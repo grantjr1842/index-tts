@@ -389,6 +389,20 @@ tts.infer(spk_audio_prompt='examples/voice_12.wav', text=text, output_path="gen.
 > 之前你做DE5很好，所以这一次也DEI3做DE2很好才XING2，如果这次目标完成得不错的话，我们就直接打DI1去银行取钱。
 > ```
 
+#### Build Moshi finetune datasets with a single reference prompt
+
+```bash
+uv run tools/build_moshi_dataset_with_indexts.py \
+  --input-jsonl examples/moshi_sample.jsonl \
+  --output-root data/moshi_demo \
+  --cfg-path checkpoints/config.yaml \
+  --model-dir checkpoints \
+  --user-spk-prompt interstellar-tars-01-resemble-denoised.wav \
+  --dataset-name moshi_demo --use-fp16 --max-samples 1
+```
+
+This utility clones each user/assistant utterance pair using the same reference audio, emits stereo WAV files (`assistant → left`, `user → right`), and writes a Moshi-compatible JSONL manifest that can be ingested by [`moshi-finetune`](https://github.com/kyutai-labs/moshi-finetune) via `python annotate.py data/moshi_demo/moshi_demo.jsonl`.
+
 ### Legacy: IndexTTS1 User Guide
 
 You can also use our previous IndexTTS1 model by importing a different module:
