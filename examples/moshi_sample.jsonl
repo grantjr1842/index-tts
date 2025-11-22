@@ -1,0 +1,2 @@
+{"id": "demo_001", "user_text": "Thanks for jumping on the call—can you describe what the dashboard should highlight first?", "assistant_text": "Absolutely. I'll summarize the login funnel and call out the anomaly on the alerts row."}
+{"id": "demo_002", "user_text": "That works. Could you also add a calm reminder about the SLA?", "assistant_text": "Consider it done. I'll note the four hour SLA and stack-rank escalations underneath."}
