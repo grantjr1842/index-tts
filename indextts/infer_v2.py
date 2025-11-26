@@ -5,7 +5,11 @@ os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
 import json
 import re
 import time
+from dataclasses import dataclass
+from typing import Optional, Union
+
 import librosa
+import numpy as np
 import torch
 import torchaudio
 from torch.nn.utils.rnn import pad_sequence
@@ -34,6 +38,17 @@ import safetensors
 from transformers import SeamlessM4TFeatureExtractor
 import random
 import torch.nn.functional as F
+
+
+@dataclass
+class InferenceResult:
+    """Lightweight container for memory-returning inference outputs."""
+
+    sampling_rate: int
+    audio: Union[torch.Tensor, "np.ndarray"]
+    duration_sec: float
+    saved_path: Optional[str] = None
+    rtf: Optional[float] = None
 
 class IndexTTS2:
     def __init__(
@@ -352,14 +367,16 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=120, stream_return=False, more_segment_before=0,
+              return_audio=False, return_numpy=False, **generation_kwargs):
         if stream_return:
             return self.infer_generator(
                 spk_audio_prompt, text, output_path,
                 emo_audio_prompt, emo_alpha,
                 emo_vector,
                 use_emo_text, emo_text, use_random, interval_silence,
-                verbose, max_text_tokens_per_segment, stream_return, more_segment_before, **generation_kwargs
+                verbose, max_text_tokens_per_segment, stream_return, more_segment_before,
+                return_audio=return_audio, return_numpy=return_numpy, **generation_kwargs
             )
         else:
             try:
@@ -368,7 +385,8 @@ class IndexTTS2:
                     emo_audio_prompt, emo_alpha,
                     emo_vector,
                     use_emo_text, emo_text, use_random, interval_silence,
-                    verbose, max_text_tokens_per_segment, stream_return, more_segment_before, **generation_kwargs
+                    verbose, max_text_tokens_per_segment, stream_return, more_segment_before,
+                    return_audio=return_audio, return_numpy=return_numpy, **generation_kwargs
                 ))[0]
             except IndexError:
                 return None
@@ -377,7 +395,10 @@ class IndexTTS2:
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_segment=120, stream_return=False, quick_streaming_tokens=0, **generation_kwargs):
+              verbose=False, max_text_tokens_per_segment=120, stream_return=False, quick_streaming_tokens=0,
+              return_audio=False, return_numpy=False, **generation_kwargs):
+        if stream_return and return_audio:
+            raise ValueError("return_audio cannot be combined with stream_return mode.")
         print(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
@@ -670,7 +691,9 @@ class IndexTTS2:
         self._set_gr_progress(0.9, "saving audio...")
         wavs = self.insert_interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
         wav = torch.cat(wavs, dim=1)
-        wav_length = wav.shape[-1] / sampling_rate
+        wav = wav.cpu()
+        mono_audio = wav.squeeze(0).contiguous()
+        wav_length = mono_audio.shape[-1] / sampling_rate
         print(f">> gpt_gen_time: {gpt_gen_time:.2f} seconds")
         print(f">> gpt_forward_time: {gpt_forward_time:.2f} seconds")
         print(f">> s2mel_time: {s2mel_time:.2f} seconds")
@@ -678,28 +701,42 @@ class IndexTTS2:
         print(f">> Total inference time: {end_time - start_time:.2f} seconds")
         print(f">> Generated audio length: {wav_length:.2f} seconds")
         print(f">> RTF: {(end_time - start_time) / wav_length:.4f}")
+        total_time = end_time - start_time
+        rtf = (total_time / wav_length) if wav_length else None
 
-        # save audio
-        wav = wav.cpu()  # to cpu
-        if output_path:
-            # 直接保存音频到指定路径中
+        saved_path = None
+        if output_path and not return_audio:
             if os.path.isfile(output_path):
                 os.remove(output_path)
                 print(">> remove old wav file:", output_path)
             if os.path.dirname(output_path) != "":
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)
+            torchaudio.save(output_path, mono_audio.unsqueeze(0).type(torch.int16), sampling_rate)
             print(">> wav file saved to:", output_path)
+            saved_path = output_path
             if stream_return:
                 return None
             yield output_path
-        else:
-            if stream_return:
-                return None
-            # 返回以符合Gradio的格式要求
-            wav_data = wav.type(torch.int16)
-            wav_data = wav_data.numpy().T
-            yield (sampling_rate, wav_data)
+            return
+
+        if return_audio:
+            audio_payload = mono_audio.clone()
+            if return_numpy:
+                audio_payload = audio_payload.numpy().copy()
+            yield InferenceResult(
+                sampling_rate=sampling_rate,
+                audio=audio_payload,
+                duration_sec=float(wav_length),
+                saved_path=saved_path,
+                rtf=rtf,
+            )
+            return
+
+        if stream_return:
+            return None
+        wav_data = mono_audio.unsqueeze(0).type(torch.int16)
+        wav_data = wav_data.numpy().T
+        yield (sampling_rate, wav_data)
 
 
 def find_most_similar_cosine(query_vector, matrix):

@@ -1,0 +1,14 @@
+=== sample durations ===
+ demo_001: legacy=4.4466s thread=4.6904s diff=+0.2438s
+ demo_002: legacy=4.9459s thread=4.4698s diff=-0.4760s
+
+=== harness durations ===
+ case_001: legacy=5.2825s thread=5.6889s diff=+0.4063s
+ case_002: legacy=6.6061s thread=6.6293s diff=+0.0232s
+ case_003: legacy=4.3073s thread=4.2725s diff=-0.0348s
+ case_004: legacy=8.9049s thread=10.1820s diff=+1.2771s
+ case_005: legacy=5.9211s thread=6.0256s diff=+0.1045s
+ case_006: legacy=5.5263s thread=5.3638s diff=-0.1625s
+ case_007: legacy=5.5844s thread=5.5496s diff=-0.0348s
+ case_008: legacy=6.4203s thread=6.8383s diff=+0.4180s
+

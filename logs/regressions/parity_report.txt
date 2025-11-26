@@ -1,0 +1,20 @@
+=== sample parity ===
+legacy samples: 2, thread samples: 2
+ duration comparisons: 2 rows, max abs diff 0.4760s
+ hash mismatches (2):
+  demo_001: legacy=224e7ebfd47a thread=9558d0a441ea
+  demo_002: legacy=0c45428f33a7 thread=4c8ac3c65944
+
+=== harness parity ===
+legacy samples: 8, thread samples: 8
+ duration comparisons: 8 rows, max abs diff 1.2771s
+ hash mismatches (8):
+  case_001: legacy=74b376655d3e thread=e770a946f8a3
+  case_002: legacy=23613a10ae5c thread=06da4c5a8649
+  case_003: legacy=afcc82ea7669 thread=be094a104ee4
+  case_004: legacy=cc58c78343e1 thread=ef764c13cc1b
+  case_005: legacy=bc3ee31156e9 thread=7585142850a6
+  case_006: legacy=bbd80905d974 thread=e932ae6ee923
+  case_007: legacy=e5003ba71b94 thread=bfc1e8396c0a
+  case_008: legacy=0e0c6485dfbf thread=21a328aca0b0
+

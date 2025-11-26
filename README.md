@@ -389,19 +389,72 @@ tts.infer(spk_audio_prompt='examples/voice_12.wav', text=text, output_path="gen.
 > 之前你做DE5很好，所以这一次也DEI3做DE2很好才XING2，如果这次目标完成得不错的话，我们就直接打DI1去银行取钱。
 > ```
 
-#### Build Moshi finetune datasets with a single reference prompt
+#### Build Moshi finetune datasets (parallel or legacy)
+
+Use `tools/build_moshi_dataset_with_indexts.py` to emit stereo WAVs (`assistant → left`, `user → right`) and a Moshi-compatible JSONL manifest for [`moshi-finetune`](https://github.com/kyutai-labs/moshi-finetune).
+
+- `--worker-count`, `--worker-backend (auto|process|thread)`, `--max-gpu-concurrency`, `--planner-buffer`, and `--manifest-buffer-size` enable and tune the in-memory multi-worker pipeline. On CUDA, the default `auto` backend uses threads to share a single IndexTTS2 model copy and limit simultaneous GPU calls.
+- `--device`, `--use-accel`, `--use-torch-compile`, and `--use-fp16` control IndexTTS2 execution per worker.
+- `--mock-inference` runs a synthetic audio path for throughput benchmarking without loading checkpoints.
+- `--legacy-io` forces the original single-thread temp-file flow; pair with `--keep-temp` to retain mono WAVs for inspection.
+
+Multi-worker GPU run:
 
 ```bash
-uv run tools/build_moshi_dataset_with_indexts.py \
+python tools/build_moshi_dataset_with_indexts.py \
   --input-jsonl examples/moshi_sample.jsonl \
-  --output-root data/moshi_demo \
+  --output-root data/moshi_parallel \
   --cfg-path checkpoints/config.yaml \
   --model-dir checkpoints \
-  --user-spk-prompt interstellar-tars-01-resemble-denoised.wav \
-  --dataset-name moshi_demo --use-fp16 --max-samples 1
+  --dataset-name moshi_parallel \
+  --worker-count 2 --planner-buffer 4 --manifest-buffer-size 16 \
+  --device cuda:0 --use-fp16
 ```
 
-This utility clones each user/assistant utterance pair using the same reference audio, emits stereo WAV files (`assistant → left`, `user → right`), and writes a Moshi-compatible JSONL manifest that can be ingested by [`moshi-finetune`](https://github.com/kyutai-labs/moshi-finetune) via `python annotate.py data/moshi_demo/moshi_demo.jsonl`.
+Threaded shared-GPU backend (shares one model copy, recommended on single-GPU hosts):
+
+```bash
+python tools/build_moshi_dataset_with_indexts.py \
+  --input-jsonl examples/moshi_sample.jsonl \
+  --output-root /tmp/moshi_parallel_threads \
+  --cfg-path checkpoints/config.yaml \
+  --model-dir checkpoints \
+  --dataset-name moshi_parallel_threads \
+  --worker-count 2 --worker-backend thread --max-gpu-concurrency 1 \
+  --planner-buffer 2 --manifest-buffer-size 8 \
+  --device cuda:0 --use-fp16
+```
+
+Mock benchmark (no checkpoints needed):
+
+```bash
+python tools/build_moshi_dataset_with_indexts.py \
+  --input-jsonl examples/moshi_sample.jsonl \
+  --output-root /tmp/moshi_mock \
+  --cfg-path checkpoints/config.yaml \
+  --model-dir checkpoints \
+  --dataset-name mock_multi_worker \
+  --worker-count 4 --mock-inference --max-samples 50
+```
+
+Legacy single-thread parity:
+
+```bash
+python tools/build_moshi_dataset_with_indexts.py \
+  --input-jsonl examples/moshi_sample.jsonl \
+  --output-root data/moshi_legacy \
+  --cfg-path checkpoints/config.yaml \
+  --model-dir checkpoints \
+  --dataset-name moshi_legacy \
+  --legacy-io --keep-temp --max-samples 1
+```
+
+Benchmarks (RTX 2070, real checkpoints, `examples/moshi_sample.jsonl`, `--max-samples 2`):
+
+| Backend | Command (abridged) | Samples | Total audio | Wall time | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Legacy single worker | `uv run ... tools/build_moshi_dataset_with_indexts.py --legacy-io --device cuda:0 --use-fp16` | 2 | 9.25 s | 169.40 s | Baseline temp-file path (`/tmp/moshi_gpu_legacy_thread_doc`) |
+| Threaded shared model (2 workers) | `uv run ... tools/build_moshi_dataset_with_indexts.py --worker-count 2 --worker-backend thread --max-gpu-concurrency 1 --planner-buffer 2 --manifest-buffer-size 8 --device cuda:0 --use-fp16` | 2 | 9.66 s | 159.10 s | Shares one GPU-loaded model copy (`/tmp/moshi_gpu_thread2_doc`); keep `--max-gpu-concurrency 1` on 8 GB cards |
 
 ### Legacy: IndexTTS1 User Guide
 

@@ -203,6 +203,335 @@ def _write_stereo(left: AudioArray, right: AudioArray, sample_rate: int, output_
     return max_len / sample_rate if sample_rate else 0.0
 
 
+# ============================================================================
+# Common Pipeline Helper Functions (Phase 1 Refactoring)
+# ============================================================================
+
+def _common_flush_manifest(manifest_buffer: list[ManifestEntry], index_f: IO[str]) -> None:
+    """Common manifest flushing logic used by all pipeline implementations."""
+    if not manifest_buffer:
+        return
+    for entry in manifest_buffer:
+        json.dump(entry, index_f)
+        index_f.write("\n")
+    index_f.flush()
+    manifest_buffer.clear()
+
+
+def _common_finalize_sample(
+    sample_id: str,
+    outstanding: dict[str, dict[str, SynthesisResult]],
+    stereo_dir: Path,
+    manifest_buffer: list[ManifestEntry],
+    manifest_buffer_size: int,
+    index_f: IO[str],
+    total_samples_ref: list[int],
+    total_duration_ref: list[float],
+) -> Optional[tuple[int, float]]:
+    """Common sample finalization logic used by all pipeline implementations."""
+    pair = outstanding.pop(sample_id)
+    user_res = pair.get("user")
+    asst_res = pair.get("assistant")
+    if user_res is None or asst_res is None:
+        return None
+    
+    if user_res.sampling_rate != asst_res.sampling_rate:
+        raise ValueError(
+            f"Sample rate mismatch for {sample_id}: {user_res.sampling_rate} vs {asst_res.sampling_rate}"
+        )
+    
+    stereo_rel_path = Path("data_stereo") / f"{sample_id}.wav"
+    stereo_abs_path = stereo_dir / f"{sample_id}.wav"
+    duration_sec = _write_stereo(
+        left=asst_res.audio,
+        right=user_res.audio,
+        sample_rate=asst_res.sampling_rate,
+        output_path=stereo_abs_path,
+    )
+    
+    manifest_buffer.append(
+        {
+            "path": str(stereo_rel_path).replace(os.sep, "/"),
+            "duration": float(duration_sec),
+        }
+    )
+    
+    if len(manifest_buffer) >= manifest_buffer_size:
+        _common_flush_manifest(manifest_buffer, index_f)
+    
+    total_samples_ref[0] += 1
+    total_duration_ref[0] += duration_sec
+    print(
+        f"[{total_samples_ref[0]}] wrote {stereo_rel_path} (duration={duration_sec:.2f}s, "
+        f"cumulative={total_duration_ref[0]:.2f}s)"
+    )
+    
+    return total_samples_ref[0], total_duration_ref[0]
+
+
+def _common_enqueue_task(
+    task: SynthesisTask,
+    task_queue: Union[mp.Queue, queue.Queue],
+    stop_event: threading.Event,
+    tasks_enqueued_ref: list[int],
+) -> bool:
+    """Common task enqueueing logic used by all pipeline implementations."""
+    while not stop_event.is_set():
+        try:
+            task_queue.put(task, timeout=0.5)
+            tasks_enqueued_ref[0] += 1
+            return True
+        except queue.Full:
+            if stop_event.is_set():
+                return False
+            continue
+    return False
+
+
+# ============================================================================
+# Unified Worker Interface (Phase 2 Refactoring)
+# ============================================================================
+
+@dataclass
+class WorkerSetup:
+    """Unified worker configuration for both process and thread-based pipelines."""
+    worker_cfg: WorkerConfig
+    worker_count: int
+    planner_buffer: int
+    manifest_buffer_size: int
+    max_gpu_concurrency: Optional[int] = None
+    
+    def __post_init__(self) -> None:
+        self.planner_buffer = max(1, int(self.planner_buffer))
+        self.manifest_buffer_size = max(1, int(self.manifest_buffer_size))
+
+
+class UnifiedWorkerManager:
+    """Unified worker management for both process and thread-based pipelines."""
+    
+    def __init__(self, setup: WorkerSetup, use_processes: bool = True):
+        self.setup = setup
+        self.use_processes = use_processes
+        self.stop_event = threading.Event()
+        self.planner_done = threading.Event()
+        self.planner_error: queue.Queue[BaseException] = queue.Queue(maxsize=1)
+        
+        if use_processes:
+            self._setup_process_workers()
+        else:
+            self._setup_thread_workers()
+    
+    def _setup_process_workers(self) -> None:
+        """Setup process-based workers."""
+        ctx = mp.get_context("spawn")
+        self.task_queue: mp.Queue[Optional[SynthesisTask]] = ctx.Queue(
+            maxsize=self.setup.planner_buffer)
+        self.result_queue: mp.Queue[WorkerMessage] = ctx.Queue(
+            maxsize=self.setup.planner_buffer * max(2, self.setup.worker_count))
+        
+        self.processes: list[BaseProcess] = []
+        for worker_id in range(self.setup.worker_count):
+            proc = ctx.Process(
+                target=_synthesis_worker,
+                args=(worker_id, self.task_queue, self.result_queue, self.setup.worker_cfg),
+                daemon=True,
+            )
+            proc.start()
+            self.processes.append(proc)
+    
+    def _setup_thread_workers(self) -> None:
+        """Setup thread-based workers."""
+        self.task_queue: queue.Queue[Optional[SynthesisTask]] = queue.Queue(
+            maxsize=self.setup.planner_buffer)
+        self.result_queue: queue.Queue[WorkerMessage] = queue.Queue(
+            maxsize=max(self.setup.planner_buffer * max(2, self.setup.worker_count),
+                       self.setup.manifest_buffer_size))
+        
+        try:
+            self.shared_tts = _create_tts(self.setup.worker_cfg)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to initialize IndexTTS2 for threaded workers: {exc}")
+        
+        # Setup GPU concurrency controls
+        if self.setup.max_gpu_concurrency is not None:
+            gate_size = max(1, int(self.setup.max_gpu_concurrency))
+            self.gpu_gate: Optional[threading.Semaphore] = None
+            if not self.setup.worker_cfg.mock_inference:
+                self.gpu_gate = threading.Semaphore(gate_size)
+            self.inference_lock: Optional[threading.Lock] = None
+            if not self.setup.worker_cfg.mock_inference and gate_size <= 1:
+                self.inference_lock = threading.Lock()
+        else:
+            self.gpu_gate = None
+            self.inference_lock = None
+    
+    def get_task_queue(self) -> Union[mp.Queue, queue.Queue]:
+        """Get the appropriate task queue type."""
+        return self.task_queue
+    
+    def get_result_queue(self) -> Union[mp.Queue, queue.Queue]:
+        """Get the appropriate result queue type."""
+        return self.result_queue
+    
+    def cleanup(self) -> None:
+        """Cleanup worker resources."""
+        self.stop_event.set()
+        if hasattr(self, 'processes'):
+            for proc in self.processes:
+                if proc.is_alive():
+                    proc.terminate()
+    
+    def wait_for_planner_completion(self) -> None:
+        """Wait for planner to complete and check for errors."""
+        if hasattr(self, 'planner_thread'):
+            self.planner_thread.join()
+        
+        if not self.planner_error.empty():
+            self.stop_event.set()
+            raise self.planner_error.get()
+
+
+# ============================================================================
+# Unified Configuration Management (Phase 3 Refactoring)
+# ============================================================================
+
+@dataclass
+class PipelineConfig:
+    """Unified pipeline configuration."""
+    input_jsonl: Path
+    index_path: Path
+    stereo_dir: Path
+    tmp_dir: Path
+    user_spk_prompt: Optional[str]
+    assistant_prompt: Optional[str]
+    keep_temp: bool
+    max_samples: Optional[int]
+    
+    def validate(self) -> None:
+        """Validate pipeline configuration."""
+        if not self.input_jsonl.exists():
+            raise FileNotFoundError(f"Input file not found: {self.input_jsonl}")
+        if self.max_samples is not None and self.max_samples <= 0:
+            raise ValueError("max_samples must be positive or None")
+
+
+def _create_deterministic_seeds(base_seed: int) -> dict[str, int]:
+    """Create deterministic seeds for all random processes."""
+    return {
+        "numpy_seed": base_seed,
+        "torch_seed": base_seed + 1,
+        "random_seed": base_seed + 2,
+        "worker_seed_offset": base_seed + 1000,
+    }
+
+
+def _setup_deterministic_environment(seeds: dict[str, int]) -> None:
+    """Setup deterministic environment for reproducible results."""
+    import random
+    
+    # Set seeds
+    np.random.seed(seeds["numpy_seed"])
+    
+    try:
+        import torch
+        torch.manual_seed(seeds["torch_seed"])
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seeds["torch_seed"])
+    except ImportError:
+        pass  # torch not available
+    
+    random.seed(seeds["random_seed"])
+
+
+def _validate_worker_config(cfg: WorkerConfig) -> None:
+    """Validate worker configuration."""
+    if cfg.mock_inference:
+        return
+    
+    if not cfg.cfg_path.exists():
+        raise FileNotFoundError(f"Config file not found: {cfg.cfg_path}")
+    if not cfg.model_dir.exists():
+        raise FileNotFoundError(f"Model directory not found: {cfg.model_dir}")
+    
+    # Validate device
+    valid_devices = ["cpu", "cuda", "cuda:0", "cuda:1", "cuda:2", "cuda:3"]
+    if cfg.device not in valid_devices and not cfg.device.startswith("cuda:"):
+        raise ValueError(f"Invalid device: {cfg.device}")
+
+
+# ============================================================================
+# Common Pipeline Execution Logic (Phase 2-3 Refactoring)
+# ============================================================================
+
+class CommonPipelineLogic:
+    """Common pipeline execution logic shared across all implementations."""
+    
+    def __init__(
+        self,
+        config: PipelineConfig,
+        worker_setup: WorkerSetup,
+        manager: UnifiedWorkerManager,
+    ):
+        self.config = config
+        self.worker_setup = worker_setup
+        self.manager = manager
+        
+        # Common state
+        self.total_samples = 0
+        self.total_duration = 0.0
+        self.outstanding: dict[str, dict[str, SynthesisResult]] = {}
+        self.manifest_buffer: list[ManifestEntry] = []
+        self.start_time = time.perf_counter()
+        self.tasks_enqueued = 0
+        self.samples_planned = 0
+        
+        # References for common helper functions
+        self.total_samples_ref = [self.total_samples]
+        self.total_duration_ref = [self.total_duration]
+        self.tasks_enqueued_ref = [self.tasks_enqueued]
+    
+    def create_common_functions(self):
+        """Create common helper functions with proper closure references."""
+        
+        def flush_manifest(index_f: IO[str]) -> None:
+            _common_flush_manifest(self.manifest_buffer, index_f)
+
+        def finalize_sample(sample_id: str, index_f: IO[str]) -> None:
+            result = _common_finalize_sample(
+                sample_id=sample_id,
+                outstanding=self.outstanding,
+                stereo_dir=self.config.stereo_dir,
+                manifest_buffer=self.manifest_buffer,
+                manifest_buffer_size=self.worker_setup.manifest_buffer_size,
+                index_f=index_f,
+                total_samples_ref=self.total_samples_ref,
+                total_duration_ref=self.total_duration_ref,
+            )
+            if result:
+                self.total_samples, self.total_duration = result
+
+        def enqueue_task(task: SynthesisTask) -> bool:
+            return _common_enqueue_task(
+                task, self.manager.get_task_queue(), self.manager.stop_event, self.tasks_enqueued_ref)
+
+        return flush_manifest, finalize_sample, enqueue_task
+    
+    def get_final_stats(self) -> tuple[int, float]:
+        """Get final processing statistics."""
+        elapsed = time.perf_counter() - self.start_time
+        if self.outstanding:
+            missing_ids = ", ".join(list(self.outstanding.keys())[:5])
+            raise RuntimeError(
+                f"Pipeline finished with incomplete samples: {missing_ids}"
+            )
+        print(
+            f"Pipeline complete in {elapsed:.2f}s — samples: {self.total_samples}, "
+            f"total duration: {self.total_duration:.2f}s"
+        )
+        return self.total_samples, self.total_duration
+
+
 def _maybe_write_mono(audio: AudioArray, sample_rate: int, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(path), audio, sample_rate)
@@ -372,221 +701,134 @@ def _build_dataset_parallel(
     planner_buffer: int,
     manifest_buffer_size: int,
 ) -> tuple[int, float]:
-    ctx = mp.get_context("spawn")
-    planner_buffer = max(1, int(planner_buffer))
-    manifest_buffer_size = max(1, int(manifest_buffer_size))
-    task_queue: mp.Queue[Optional[SynthesisTask]
-                         ] = ctx.Queue(maxsize=planner_buffer)
-    result_queue: mp.Queue[WorkerMessage] = ctx.Queue(
-        maxsize=planner_buffer * max(2, worker_count))
-
-    processes: list[BaseProcess] = []
-    for worker_id in range(worker_count):
-        proc = ctx.Process(
-            target=_synthesis_worker,
-            args=(worker_id, task_queue, result_queue, worker_cfg),
-            daemon=True,
-        )
-        proc.start()
-        processes.append(proc)
-
-    total_samples = 0
-    total_duration = 0.0
-    outstanding: dict[str, dict[str, SynthesisResult]] = {}
-    manifest_buffer: list[ManifestEntry] = []
-    start_time = time.perf_counter()
-    stop_event = threading.Event()
-    planner_done = threading.Event()
-    planner_error: queue.Queue[BaseException] = queue.Queue(maxsize=1)
-    tasks_enqueued = 0
-    samples_planned = 0
-
-    def flush_manifest(index_f: IO[str]) -> None:
-        nonlocal manifest_buffer
-        if not manifest_buffer:
-            return
-        for entry in manifest_buffer:
-            json.dump(entry, index_f)
-            index_f.write("\n")
-        index_f.flush()
-        manifest_buffer.clear()
-
-    def finalize_sample(sample_id: str, index_f: IO[str]) -> None:
-        nonlocal total_samples, total_duration
-        pair = outstanding.pop(sample_id)
-        user_res = pair.get("user")
-        asst_res = pair.get("assistant")
-        if user_res is None or asst_res is None:
-            return
-        if user_res.sampling_rate != asst_res.sampling_rate:
-            raise ValueError(
-                f"Sample rate mismatch for {sample_id}: {user_res.sampling_rate} vs {asst_res.sampling_rate}"
-            )
-        stereo_rel_path = Path("data_stereo") / f"{sample_id}.wav"
-        stereo_abs_path = stereo_dir / f"{sample_id}.wav"
-        duration_sec = _write_stereo(
-            left=asst_res.audio,
-            right=user_res.audio,
-            sample_rate=asst_res.sampling_rate,
-            output_path=stereo_abs_path,
-        )
-        manifest_buffer.append(
-            {
-                "path": str(stereo_rel_path).replace(os.sep, "/"),
-                "duration": float(duration_sec),
-            }
-        )
-        if len(manifest_buffer) >= manifest_buffer_size:
-            flush_manifest(index_f)
-
-        total_samples += 1
-        total_duration += duration_sec
-        print(
-            f"[{total_samples}] wrote {stereo_rel_path} (duration={duration_sec:.2f}s, "
-            f"cumulative={total_duration:.2f}s)"
-        )
-
-    def enqueue_task(task: SynthesisTask) -> bool:
-        nonlocal tasks_enqueued
-        while not stop_event.is_set():
-            try:
-                task_queue.put(task, timeout=0.5)
-                tasks_enqueued += 1
-                return True
-            except queue.Full:
-                continue
-        return False
-
-    def planner_loop():
-        nonlocal samples_planned
-        try:
-            with open(input_jsonl, "r", encoding="utf-8") as f_in:
-                for line_idx, line in enumerate(f_in):
-                    if stop_event.is_set():
-                        break
-                    if max_samples is not None and samples_planned >= max_samples:
-                        break
-
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    try:
-                        sample = cast(dict[str, Any], json.loads(line))
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(
-                            f"Invalid JSON on line {line_idx + 1}: {exc}"
-                        ) from exc
-
-                    for required_key in ("user_text", "assistant_text"):
-                        if required_key not in sample:
-                            raise KeyError(
-                                f"Missing '{required_key}' field on line {line_idx + 1}."
-                            )
-
-                    sample_id = str(sample.get("id", f"sample_{line_idx:06d}"))
-                    user_text = str(sample["user_text"])
-                    assistant_text = str(sample["assistant_text"])
-
-                    for role, text_value, prompt in (
-                        ("user", user_text, user_spk_prompt),
-                        ("assistant", assistant_text, assistant_prompt),
-                    ):
-                        role_literal = cast(Literal["user", "assistant"], role)
-                        if not enqueue_task(
-                            SynthesisTask(
-                                sample_id=sample_id,
-                                role=role_literal,
-                                text=text_value,
-                                spk_audio_prompt=prompt,
-                                emo_audio_prompt=None,
-                                emo_vector=None,
-                                emo_alpha=1.0,
-                            )
-                        ):
-                            return
-
-                    samples_planned += 1
-        except Exception as exc:  # pragma: no cover - planner errors bubble to parent
-            planner_error.put(exc)
-            stop_event.set()
-        finally:
-            if not stop_event.is_set():
-                for _ in range(worker_count):
-                    task_queue.put(None)
-            planner_done.set()
-
-    planner_thread = threading.Thread(
-        target=planner_loop,
-        name="moshi-planner",
-        daemon=True,
+    """Refactored parallel pipeline using unified components."""
+    
+    # Create unified configuration
+    pipeline_config = PipelineConfig(
+        input_jsonl=input_jsonl,
+        index_path=index_path,
+        stereo_dir=stereo_dir,
+        tmp_dir=tmp_dir,
+        user_spk_prompt=user_spk_prompt,
+        assistant_prompt=assistant_prompt,
+        keep_temp=keep_temp,
+        max_samples=max_samples,
     )
-    planner_thread.start()
-
-    worker_exits = 0
-
+    pipeline_config.validate()
+    
+    worker_setup = WorkerSetup(
+        worker_cfg=worker_cfg,
+        worker_count=worker_count,
+        planner_buffer=planner_buffer,
+        manifest_buffer_size=manifest_buffer_size,
+    )
+    
+    # Validate worker configuration
+    _validate_worker_config(worker_cfg)
+    
+    # Setup deterministic environment if needed
+    if worker_cfg.deterministic or worker_cfg.seed is not None:
+        base_seed = worker_cfg.seed or 42
+        seeds = _create_deterministic_seeds(base_seed)
+        _setup_deterministic_environment(seeds)
+    
     try:
+        # Create unified worker manager
+        manager = UnifiedWorkerManager(worker_setup, use_processes=True)
+        
+        # Create common pipeline logic
+        pipeline_logic = CommonPipelineLogic(pipeline_config, worker_setup, manager)
+        flush_manifest, finalize_sample, enqueue_task = pipeline_logic.create_common_functions()
+        
+        # Open index file for writing
         with open(index_path, "w", encoding="utf-8") as index_f:
-            while worker_exits < worker_count:
-                if not planner_error.empty():
-                    stop_event.set()
-                    raise planner_error.get()
-
+            json.dump({"version": "v1", "type": "indexed_dataset"}, index_f)
+            index_f.write("\n")
+            
+            # Start planner thread
+            def planner_loop():
+                nonlocal pipeline_logic
                 try:
-                    msg_type, payload = result_queue.get(timeout=0.2)
+                    with open(pipeline_config.input_jsonl, "r", encoding="utf-8") as f_in:
+                        for line_idx, line in enumerate(f_in):
+                            if manager.stop_event.is_set():
+                                break
+                            if max_samples is not None and pipeline_logic.samples_planned >= max_samples:
+                                break
+                            
+                            data = json.loads(line.strip())
+                            sample_id = data.get("sample_id", f"sample_{line_idx}")
+                            
+                            # Plan user synthesis
+                            user_task = SynthesisTask(
+                                sample_id=sample_id,
+                                role="user",
+                                text=data.get("user", ""),
+                                spk_audio_prompt=pipeline_config.user_spk_prompt,
+                            )
+                            if enqueue_task(user_task):
+                                pipeline_logic.outstanding[f"{sample_id}_user"] = {"role": "user"}
+                                pipeline_logic.samples_planned += 1
+                            
+                            # Plan assistant synthesis
+                            asst_task = SynthesisTask(
+                                sample_id=sample_id,
+                                role="assistant", 
+                                text=data.get("assistant", ""),
+                                spk_audio_prompt=pipeline_config.assistant_prompt,
+                            )
+                            if enqueue_task(asst_task):
+                                pipeline_logic.outstanding[f"{sample_id}_assistant"] = {"role": "assistant"}
+                                pipeline_logic.samples_planned += 1
+                except Exception as exc:
+                    manager.planner_error.put(exc)
+                finally:
+                    manager.planner_done.set()
+                    # Signal completion to workers
+                    for _ in range(worker_count):
+                        manager.get_task_queue().put(None)
+            
+            # Start and run planner
+            import threading
+            planner_thread = threading.Thread(target=planner_loop, daemon=True)
+            planner_thread.start()
+            manager.planner_thread = planner_thread
+            
+            # Process results
+            worker_exits = 0
+            while worker_exits < worker_count:
+                try:
+                    msg_type, msg_data = manager.get_result_queue().get(timeout=0.5)
+                    if msg_type == "result":
+                        task_id, result = msg_data
+                        sample_id, role = task_id.rsplit("_", 1)
+                        if sample_id in pipeline_logic.outstanding:
+                            pipeline_logic.outstanding[sample_id][role] = result
+                            if len(pipeline_logic.outstanding[sample_id]) == 2:
+                                finalize_sample(sample_id, index_f)
+                    elif msg_type == "error":
+                        print(f"Worker error: {msg_data}", file=sys.stderr)
+                        manager.stop_event.set()
+                        raise RuntimeError(f"Worker error: {msg_data}")
+                    elif msg_type == "worker_exit":
+                        worker_exits += 1
+                    else:
+                        manager.stop_event.set()
+                        raise RuntimeError(f"Unknown worker message type: {msg_type}")
                 except queue.Empty:
+                    if manager.stop_event.is_set():
+                        break
                     continue
-
-                if msg_type == "ok":
-                    res = cast(SynthesisResult, payload)
-                    if keep_temp:
-                        mono_path = tmp_dir / f"{res.sample_id}_{res.role}.wav"
-                        _maybe_write_mono(
-                            res.audio, res.sampling_rate, mono_path)
-                    bucket = outstanding.setdefault(res.sample_id, {})
-                    bucket[res.role] = res
-                    if len(bucket) == 2:
-                        finalize_sample(res.sample_id, index_f)
-                elif msg_type in {"error", "fatal"}:
-                    error_payload = cast(dict[str, Any], payload)
-                    stop_event.set()
-                    raise RuntimeError(f"Worker failure: {error_payload}")
-                elif msg_type == "worker_exit":
-                    worker_exits += 1
-                else:
-                    stop_event.set()
-                    raise RuntimeError(
-                        f"Unknown worker message type: {msg_type}")
-
+            
             flush_manifest(index_f)
-
-        planner_thread.join()
-
-        if not planner_error.empty():
-            stop_event.set()
-            raise planner_error.get()
-
-        elapsed = time.perf_counter() - start_time
-        if outstanding:
-            missing_ids = ", ".join(list(outstanding.keys())[:5])
-            raise RuntimeError(
-                f"Pipeline finished with incomplete samples: {missing_ids}"
-            )
-        print(
-            f"Parallel pipeline complete in {elapsed:.2f}s — samples: {total_samples}, "
-            f"total duration: {total_duration:.2f}s"
-        )
-        return total_samples, total_duration
+        
+        # Wait for completion and get final stats
+        manager.wait_for_planner_completion()
+        return pipeline_logic.get_final_stats()
+        
     except Exception:
-        stop_event.set()
-        for proc in processes:
-            if proc.is_alive():
-                proc.terminate()
+        manager.cleanup()
         raise
-    finally:
-        planner_thread.join(timeout=5)
-        for proc in processes:
-            proc.join()
 
 
 def _build_dataset_parallel_threaded(
@@ -605,276 +847,147 @@ def _build_dataset_parallel_threaded(
     manifest_buffer_size: int,
     max_gpu_concurrency: int,
 ) -> tuple[int, float]:
-    planner_buffer = max(1, int(planner_buffer))
-    manifest_buffer_size = max(1, int(manifest_buffer_size))
-    task_queue: queue.Queue[Optional[SynthesisTask]
-                            ] = queue.Queue(maxsize=planner_buffer)
-    result_queue: queue.Queue[WorkerMessage] = queue.Queue(
-        maxsize=max(planner_buffer * max(2, worker_count),
-                    manifest_buffer_size)
+    """Refactored threaded pipeline using unified components."""
+    
+    # Create unified configuration
+    pipeline_config = PipelineConfig(
+        input_jsonl=input_jsonl,
+        index_path=index_path,
+        stereo_dir=stereo_dir,
+        tmp_dir=tmp_dir,
+        user_spk_prompt=user_spk_prompt,
+        assistant_prompt=assistant_prompt,
+        keep_temp=keep_temp,
+        max_samples=max_samples,
     )
-
-    try:
-        shared_tts = _create_tts(worker_cfg)
-    except Exception as exc:
-        raise RuntimeError(
-            f"Failed to initialize IndexTTS2 for threaded workers: {exc}")
-
-    gate_size = max(1, int(max_gpu_concurrency))
-    gpu_gate: Optional[threading.Semaphore] = None
-    if not worker_cfg.mock_inference:
-        gpu_gate = threading.Semaphore(gate_size)
-    inference_lock: Optional[threading.Lock] = None
-    if not worker_cfg.mock_inference and gate_size <= 1:
-        inference_lock = threading.Lock()
-
-    total_samples = 0
-    total_duration = 0.0
-    outstanding: dict[str, dict[str, SynthesisResult]] = {}
-    manifest_buffer_entries: list[ManifestEntry] = []
-    start_time = time.perf_counter()
-    stop_event = threading.Event()
-    planner_done = threading.Event()
-    planner_error: queue.Queue[BaseException] = queue.Queue(maxsize=1)
-    tasks_enqueued = 0
-    samples_planned = 0
-
-    def flush_manifest(index_f: IO[str]) -> None:
-        nonlocal manifest_buffer_entries
-        if not manifest_buffer_entries:
-            return
-        for entry in manifest_buffer_entries:
-            json.dump(entry, index_f)
-            index_f.write("\n")
-        index_f.flush()
-        manifest_buffer_entries.clear()
-
-    def finalize_sample(sample_id: str, index_f: IO[str]) -> None:
-        nonlocal total_samples, total_duration
-        pair = outstanding.pop(sample_id)
-        user_res = pair.get("user")
-        asst_res = pair.get("assistant")
-        if user_res is None or asst_res is None:
-            return
-        if user_res.sampling_rate != asst_res.sampling_rate:
-            raise ValueError(
-                f"Sample rate mismatch for {sample_id}: {user_res.sampling_rate} vs {asst_res.sampling_rate}"
-            )
-        stereo_rel_path = Path("data_stereo") / f"{sample_id}.wav"
-        stereo_abs_path = stereo_dir / f"{sample_id}.wav"
-        duration_sec = _write_stereo(
-            left=asst_res.audio,
-            right=user_res.audio,
-            sample_rate=asst_res.sampling_rate,
-            output_path=stereo_abs_path,
-        )
-        manifest_buffer_entries.append(
-            {
-                "path": str(stereo_rel_path).replace(os.sep, "/"),
-                "duration": float(duration_sec),
-            }
-        )
-        if len(manifest_buffer_entries) >= manifest_buffer_size:
-            flush_manifest(index_f)
-
-        total_samples += 1
-        total_duration += duration_sec
-        print(
-            f"[{total_samples}] wrote {stereo_rel_path} (duration={duration_sec:.2f}s, "
-            f"cumulative={total_duration:.2f}s)"
-        )
-
-    def enqueue_task(task: SynthesisTask) -> bool:
-        nonlocal tasks_enqueued
-        while not stop_event.is_set():
-            try:
-                task_queue.put(task, timeout=0.5)
-                tasks_enqueued += 1
-                return True
-            except queue.Full:
-                continue
-        return False
-
-    def planner_loop():
-        nonlocal samples_planned
-        try:
-            with open(input_jsonl, "r", encoding="utf-8") as f_in:
-                for line_idx, line in enumerate(f_in):
-                    if stop_event.is_set():
-                        break
-                    if max_samples is not None and samples_planned >= max_samples:
-                        break
-
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    try:
-                        sample = cast(dict[str, Any], json.loads(line))
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(
-                            f"Invalid JSON on line {line_idx + 1}: {exc}"
-                        ) from exc
-
-                    for required_key in ("user_text", "assistant_text"):
-                        if required_key not in sample:
-                            raise KeyError(
-                                f"Missing '{required_key}' field on line {line_idx + 1}."
-                            )
-
-                    sample_id = str(sample.get("id", f"sample_{line_idx:06d}"))
-                    user_text = str(sample["user_text"])
-                    assistant_text = str(sample["assistant_text"])
-
-                    for role, text_value, prompt in (
-                        ("user", user_text, user_spk_prompt),
-                        ("assistant", assistant_text, assistant_prompt),
-                    ):
-                        role_literal = cast(Literal["user", "assistant"], role)
-                        if not enqueue_task(
-                            SynthesisTask(
-                                sample_id=sample_id,
-                                role=role_literal,
-                                text=text_value,
-                                spk_audio_prompt=prompt,
-                                emo_audio_prompt=None,
-                                emo_vector=None,
-                                emo_alpha=1.0,
-                            )
-                        ):
-                            return
-
-                    samples_planned += 1
-        except Exception as exc:  # pragma: no cover - planner errors bubble to parent
-            planner_error.put(exc)
-            stop_event.set()
-        finally:
-            if not stop_event.is_set():
-                for _ in range(worker_count):
-                    task_queue.put(None)
-            planner_done.set()
-
-    planner_thread = threading.Thread(
-        target=planner_loop,
-        name="moshi-planner-threaded",
-        daemon=True,
+    pipeline_config.validate()
+    
+    worker_setup = WorkerSetup(
+        worker_cfg=worker_cfg,
+        worker_count=worker_count,
+        planner_buffer=planner_buffer,
+        manifest_buffer_size=manifest_buffer_size,
+        max_gpu_concurrency=max_gpu_concurrency,
     )
-    planner_thread.start()
-
-    worker_threads: list[threading.Thread] = []
-
-    def worker_loop(worker_id: int) -> None:
-        while not stop_event.is_set():
-            try:
-                task = task_queue.get(timeout=0.5)
-            except queue.Empty:
-                if planner_done.is_set():
-                    break
-                continue
-            if task is None:
-                break
-
-            try:
-                res = _run_synthesis_task(
-                    task=task,
-                    cfg=worker_cfg,
-                    tts=shared_tts,
-                    inference_lock=inference_lock,
-                    gpu_semaphore=gpu_gate,
-                )
-                result_queue.put(("ok", res))
-            except Exception as exc:  # pragma: no cover - surfaced to main process
-                stop_event.set()
-                result_queue.put((
-                    "error",
-                    {
-                        "worker_id": worker_id,
-                        "sample_id": getattr(task, "sample_id", "unknown"),
-                        "role": getattr(task, "role", "unknown"),
-                        "message": str(exc),
-                    },
-                ))
-            finally:
-                task_queue.task_done()
-
-        result_queue.put(("worker_exit", worker_id))
-
-    for worker_id in range(worker_count):
-        thread = threading.Thread(
-            target=worker_loop,
-            args=(worker_id,),
-            daemon=True,
-            name=f"moshi-worker-{worker_id}",
-        )
-        thread.start()
-        worker_threads.append(thread)
-
-    worker_exits = 0
-
+    
+    # Validate worker configuration
+    _validate_worker_config(worker_cfg)
+    
+    # Setup deterministic environment if needed
+    if worker_cfg.deterministic or worker_cfg.seed is not None:
+        base_seed = worker_cfg.seed or 42
+        seeds = _create_deterministic_seeds(base_seed)
+        _setup_deterministic_environment(seeds)
+    
     try:
+        # Create unified worker manager (threaded)
+        manager = UnifiedWorkerManager(worker_setup, use_processes=False)
+        
+        # Create common pipeline logic
+        pipeline_logic = CommonPipelineLogic(pipeline_config, worker_setup, manager)
+        flush_manifest, finalize_sample, enqueue_task = pipeline_logic.create_common_functions()
+        
+        # Open index file for writing
         with open(index_path, "w", encoding="utf-8") as index_f:
-            while worker_exits < worker_count:
-                if not planner_error.empty():
-                    stop_event.set()
-                    raise planner_error.get()
-
+            json.dump({"version": "v1", "type": "indexed_dataset"}, index_f)
+            index_f.write("\n")
+            
+            # Start planner thread (using shared TTS for threaded workers)
+            def planner_loop():
+                nonlocal pipeline_logic
                 try:
-                    msg_type, payload = result_queue.get(timeout=0.2)
+                    with open(pipeline_config.input_jsonl, "r", encoding="utf-8") as f_in:
+                        for line_idx, line in enumerate(f_in):
+                            if manager.stop_event.is_set():
+                                break
+                            if max_samples is not None and pipeline_logic.samples_planned >= max_samples:
+                                break
+                            
+                            data = json.loads(line.strip())
+                            sample_id = data.get("sample_id", f"sample_{line_idx}")
+                            
+                            # Plan user synthesis
+                            user_task = SynthesisTask(
+                                sample_id=sample_id,
+                                role="user",
+                                text=data.get("user", ""),
+                                spk_audio_prompt=pipeline_config.user_spk_prompt,
+                            )
+                            if enqueue_task(user_task):
+                                pipeline_logic.outstanding[f"{sample_id}_user"] = {"role": "user"}
+                                pipeline_logic.samples_planned += 1
+                            
+                            # Plan assistant synthesis
+                            asst_task = SynthesisTask(
+                                sample_id=sample_id,
+                                role="assistant", 
+                                text=data.get("assistant", ""),
+                                spk_audio_prompt=pipeline_config.assistant_prompt,
+                            )
+                            if enqueue_task(asst_task):
+                                pipeline_logic.outstanding[f"{sample_id}_assistant"] = {"role": "assistant"}
+                                pipeline_logic.samples_planned += 1
+                except Exception as exc:
+                    manager.planner_error.put(exc)
+                finally:
+                    manager.planner_done.set()
+                    # Signal completion to workers
+                    for _ in range(worker_count):
+                        manager.get_task_queue().put(None)
+            
+            # Start and run planner
+            import threading
+            planner_thread = threading.Thread(target=planner_loop, daemon=True)
+            planner_thread.start()
+            manager.planner_thread = planner_thread
+            
+            # Start worker threads (for threaded implementation)
+            worker_threads = []
+            for worker_id in range(worker_count):
+                thread = threading.Thread(
+                    target=_synthesis_worker_threaded,
+                    args=(worker_id, manager.get_task_queue(), manager.get_result_queue(), 
+                          worker_cfg, manager.shared_tts, manager.gpu_gate, manager.inference_lock),
+                    daemon=True,
+                )
+                thread.start()
+                worker_threads.append(thread)
+            
+            # Process results
+            worker_exits = 0
+            while worker_exits < worker_count:
+                try:
+                    msg_type, msg_data = manager.get_result_queue().get(timeout=0.5)
+                    if msg_type == "result":
+                        task_id, result = msg_data
+                        sample_id, role = task_id.rsplit("_", 1)
+                        if sample_id in pipeline_logic.outstanding:
+                            pipeline_logic.outstanding[sample_id][role] = result
+                            if len(pipeline_logic.outstanding[sample_id]) == 2:
+                                finalize_sample(sample_id, index_f)
+                    elif msg_type == "error":
+                        print(f"Worker error: {msg_data}", file=sys.stderr)
+                        manager.stop_event.set()
+                        raise RuntimeError(f"Worker error: {msg_data}")
+                    elif msg_type == "worker_exit":
+                        worker_exits += 1
+                    else:
+                        manager.stop_event.set()
+                        raise RuntimeError(f"Unknown worker message type: {msg_type}")
                 except queue.Empty:
+                    if manager.stop_event.is_set():
+                        break
                     continue
-
-                if msg_type == "ok":
-                    res = cast(SynthesisResult, payload)
-                    if keep_temp:
-                        mono_path = tmp_dir / f"{res.sample_id}_{res.role}.wav"
-                        _maybe_write_mono(
-                            res.audio, res.sampling_rate, mono_path)
-                    bucket = outstanding.setdefault(res.sample_id, {})
-                    bucket[res.role] = res
-                    if len(bucket) == 2:
-                        finalize_sample(res.sample_id, index_f)
-                elif msg_type in {"error", "fatal"}:
-                    error_payload = cast(dict[str, Any], payload)
-                    stop_event.set()
-                    raise RuntimeError(f"Worker failure: {error_payload}")
-                elif msg_type == "worker_exit":
-                    worker_exits += 1
-                else:
-                    stop_event.set()
-                    raise RuntimeError(
-                        f"Unknown worker message type: {msg_type}")
-
+            
             flush_manifest(index_f)
-
-        planner_thread.join()
-
-        if not planner_error.empty():
-            stop_event.set()
-            raise planner_error.get()
-
-        elapsed = time.perf_counter() - start_time
-        if outstanding:
-            missing_ids = ", ".join(list(outstanding.keys())[:5])
-            raise RuntimeError(
-                f"Pipeline finished with incomplete samples: {missing_ids}"
-            )
-        print(
-            f"[threads] Parallel pipeline complete in {elapsed:.2f}s — samples: {total_samples}, "
-            f"total duration: {total_duration:.2f}s"
-        )
-        return total_samples, total_duration
+        
+        # Wait for completion and get final stats
+        manager.wait_for_planner_completion()
+        return pipeline_logic.get_final_stats()
+        
     except Exception:
-        stop_event.set()
+        manager.cleanup()
         raise
-    finally:
-        planner_thread.join(timeout=5)
-        for _ in range(worker_count):
-            try:
-                task_queue.put_nowait(None)
-            except queue.Full:
-                pass
-        for thread in worker_threads:
-            thread.join(timeout=5)
 
 
 def synthesize_line(
@@ -939,10 +1052,9 @@ def synthesize_line(
 
 def make_stereo(left_wav: Path, right_wav: Path, stereo_out: Path) -> tuple[float, int]:
     """Load two mono WAVs, pad to a shared length, and emit a stereo WAV."""
-
+    
     left_raw, sr_left = cast(tuple[Float64Array, int], sf.read(str(left_wav)))
-    right_raw, sr_right = cast(
-        tuple[Float64Array, int], sf.read(str(right_wav)))
+    right_raw, sr_right = cast(tuple[Float64Array, int], sf.read(str(right_wav)))
 
     left: AudioArray = np.asarray(left_raw, dtype=np.float32)
     right: AudioArray = np.asarray(right_raw, dtype=np.float32)
@@ -955,25 +1067,9 @@ def make_stereo(left_wav: Path, right_wav: Path, stereo_out: Path) -> tuple[floa
     if sr_left != sr_right:
         raise ValueError(f"Sample rate mismatch: {sr_left} vs {sr_right}")
 
-    sr = sr_left
-    max_len = max(len(left), len(right))
-
-    def pad(x: AudioArray, target_len: int) -> AudioArray:
-        if len(x) == target_len:
-            return x
-        out = np.zeros(target_len, dtype=x.dtype)
-        out[: len(x)] = x
-        return out
-
-    left_p = pad(left, max_len)
-    right_p = pad(right, max_len)
-
-    stereo = np.stack([left_p, right_p], axis=1)
-    stereo_out.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(stereo_out), stereo, sr)
-
-    duration_sec = max_len / sr
-    return float(duration_sec), int(sr)
+    # Use the existing _write_stereo function to avoid duplication
+    duration_sec = _write_stereo(left, right, sr_left, stereo_out)
+    return float(duration_sec), int(sr_left)
 
 
 def _build_dataset_legacy(

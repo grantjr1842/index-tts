@@ -23,7 +23,9 @@ import yaml
 
 
 def load_checkpoint(model: torch.nn.Module, model_pth: str) -> dict:
-    checkpoint = torch.load(model_pth, map_location='cpu')
+    # Explicitly allow loading legacy .pth archives that include pickled
+    # metadata; PyTorch 2.6 default weights_only=True breaks these files.
+    checkpoint = torch.load(model_pth, map_location='cpu', weights_only=False)
     checkpoint = checkpoint['model'] if 'model' in checkpoint else checkpoint
     model.load_state_dict(checkpoint, strict=True)
     info_path = re.sub('.pth$', '.yaml', model_pth)
