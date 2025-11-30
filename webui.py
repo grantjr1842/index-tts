@@ -1,5 +1,7 @@
 from tools.i18n.i18n import I18nAuto
 from indextts.infer_v2 import IndexTTS2
+from indextts.constants import LANGUAGES, EMO_CHOICES_KEYS, MODE, MAX_LENGTH_TO_USE_SPEED
+from indextts.types import IndexTTS2Client, InferFn, NormalizeEmoVecFn
 import gradio.components as grc
 import gradio as gr
 import argparse
@@ -67,38 +69,11 @@ GradioUpdateMapping = dict[grc.Component, GradioUpdate]
 GradioUpdateTuple = tuple[GradioUpdate, ...]
 
 
-class NormalizeEmoVecFn(Protocol):
-    def __call__(self, emo_vector: list[float], apply_bias: bool = True) -> list[float]:
-        ...
-
-
-class InferFn(Protocol):
-    def __call__(
-        self,
-        *,
-        spk_audio_prompt: str | None,
-        text: str,
-        output_path: str | None,
-        emo_audio_prompt: str | None = None,
-        emo_alpha: float = 1.0,
-        emo_vector: list[float] | None = None,
-        use_emo_text: bool = False,
-        emo_text: str | None = None,
-        use_random: bool = False,
-        verbose: bool = False,
-        max_text_tokens_per_segment: int = 120,
-        **generation_kwargs: Any,
-    ) -> Any:
-        ...
-
-
-class IndexTTS2Client(Protocol):
-    normalize_emo_vec: NormalizeEmoVecFn
-    infer: InferFn
+# Protocols moved to indextts.types
 
 
 i18n = I18nAuto(language="Auto")
-MODE = 'local'
+# MODE = 'local'  # Moved to constants
 tts: IndexTTS2Client = cast(
     IndexTTS2Client,
     IndexTTS2(
@@ -110,20 +85,14 @@ tts: IndexTTS2Client = cast(
     ),
 )
 # 支持的语言列表
-LANGUAGES = {
-    "中文": "zh_CN",
-    "English": "en_US"
-}
-EMO_CHOICES_ALL = [i18n("与音色参考音频相同"),
-                   i18n("使用情感参考音频"),
-                   i18n("使用情感向量控制"),
-                   i18n("使用情感描述文本控制")]
+# LANGUAGES moved to constants
+EMO_CHOICES_ALL = [i18n(key) for key in EMO_CHOICES_KEYS]
 EMO_CHOICES_OFFICIAL = EMO_CHOICES_ALL[:-1]  # skip experimental features
 
 os.makedirs("outputs/tasks", exist_ok=True)
 os.makedirs("prompts", exist_ok=True)
 
-MAX_LENGTH_TO_USE_SPEED = 70
+# MAX_LENGTH_TO_USE_SPEED = 70 # Moved to constants
 example_cases: list[list[Any]] = []
 with open("examples/cases.jsonl", "r", encoding="utf-8") as f:
     for line in f:
