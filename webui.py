@@ -157,58 +157,40 @@ def gen_single(
     max_mel_tokens: int = 1500,
     progress: gr.Progress | None = gr.Progress(),
 ) -> GradioUpdate:
-    output_path = None
-    if not output_path:
-        output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
+    from indextts.core import generate_speech
+    
     # set gradio progress
     if progress is not None:
         setattr(tts, "gr_progress", progress)
-
-    kwargs: dict[str, float | int | bool | None] = {
-        "do_sample": bool(do_sample),
-        "top_p": float(top_p),
-        "top_k": int(top_k) if int(top_k) > 0 else None,
-        "temperature": float(temperature),
-        "length_penalty": float(length_penalty),
-        "num_beams": int(num_beams),
-        "repetition_penalty": float(repetition_penalty),
-        "max_mel_tokens": int(max_mel_tokens),
-    }
-    if not isinstance(emo_control_method, int):
-        emo_control_method = int(
-            getattr(emo_control_method, "value", emo_control_method))
-    if emo_control_method == 0:  # emotion from speaker
-        emo_ref_path = None  # remove external reference audio
-    if emo_control_method == 1:  # emotion from reference audio
-        pass
-    vec: list[float] | None = None
-    if emo_control_method == 2:  # emotion from custom vectors
-        raw_vec: list[float] = [vec1, vec2, vec3, vec4, vec5, vec6, vec7, vec8]
-        normalize_vec: NormalizeEmoVecFn = cast(
-            NormalizeEmoVecFn, tts.normalize_emo_vec
-        )
-        vec = normalize_vec(raw_vec, apply_bias=True)
-
-    if emo_text == "":
-        # erase empty emotion descriptions; `infer()` will then automatically use the main prompt
-        emo_text = None
-
-    print(
-        f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
-    infer_fn: InferFn = cast(InferFn, tts.infer)
-    output: Any = infer_fn(
-        spk_audio_prompt=prompt,
+    
+    output = generate_speech(
+        tts=tts,
+        emo_control_method=emo_control_method,
+        prompt=prompt,
         text=text,
-        output_path=output_path,
-        emo_audio_prompt=emo_ref_path,
-        emo_alpha=emo_weight,
-        emo_vector=vec,
-        use_emo_text=(emo_control_method == 3),
+        emo_ref_path=emo_ref_path,
+        emo_weight=emo_weight,
+        vec1=vec1,
+        vec2=vec2,
+        vec3=vec3,
+        vec4=vec4,
+        vec5=vec5,
+        vec6=vec6,
+        vec7=vec7,
+        vec8=vec8,
         emo_text=emo_text,
-        use_random=emo_random,
+        emo_random=emo_random,
+        max_text_tokens_per_segment=max_text_tokens_per_segment,
+        do_sample=do_sample,
+        top_p=top_p,
+        top_k=top_k,
+        temperature=temperature,
+        length_penalty=length_penalty,
+        num_beams=num_beams,
+        repetition_penalty=repetition_penalty,
+        max_mel_tokens=max_mel_tokens,
+        output_path=None,
         verbose=cmd_args.verbose,
-        max_text_tokens_per_segment=int(max_text_tokens_per_segment),
-        **kwargs,
     )
     return gr.update(value=output, visible=True)
 

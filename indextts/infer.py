@@ -1,3 +1,13 @@
+"""
+DEPRECATED: This module contains the legacy IndexTTS v1 implementation.
+
+Please use `indextts.infer_v2.IndexTTS2` instead, which provides:
+- Enhanced emotion control (vectors, text, reference audio)
+- Better audio quality with semantic codecs
+- Improved performance and features
+
+This module is kept for backward compatibility but may be removed in future versions.
+"""
 import os
 
 os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
