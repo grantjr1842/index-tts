@@ -193,7 +193,7 @@ def _normalize_audio(audio: npt.ArrayLike) -> AudioArray:
     audio_arr: AudioArray = np.asarray(audio, dtype=np.float32)
     peak = float(np.max(np.abs(audio_arr))) if audio_arr.size else 0.0
     if peak > 1.1:
-        audio_arr = audio_arr / 32767.0
+        audio_arr *= (1.0 / 32767.0) # Optimization: multiply is faster
     return audio_arr
 
 
@@ -1520,6 +1520,11 @@ def build_dataset(
                 # Disable TF32 for determinism
                 torch.backends.cuda.matmul.allow_tf32 = False
                 torch.backends.cudnn.allow_tf32 = False
+        else:
+            # Enable TF32 for better performance on Ampere+
+            if torch.cuda.is_available():
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
 
     if mock_inference:
         logger.info(
