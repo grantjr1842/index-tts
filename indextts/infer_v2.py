@@ -535,7 +535,7 @@ class IndexTTS2:
             logger.debug(f"text_tokens_list: {text_tokens_list}")
             logger.debug(f"segments count: {segments_count}")
             logger.debug(f"max_text_tokens_per_segment: {max_text_tokens_per_segment}")
-            logger.debug("\n".join(segments))
+            logger.debug("\n".join([str(seg) for seg in segments]))
         do_sample = generation_kwargs.pop("do_sample", True)
         top_p = generation_kwargs.pop("top_p", 0.8)
         top_k = generation_kwargs.pop("top_k", 30)
