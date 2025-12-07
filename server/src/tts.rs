@@ -41,10 +41,23 @@ impl TtsModel {
             let device = std::env::var("TARS_DEVICE").unwrap_or_else(|_| "cuda:0".to_string());
             kwargs.set_item("device", device)?;
 
-            // Match serve_tars.py defaults and enable optimizations
-            kwargs.set_item("use_fp16", true)?;
-            kwargs.set_item("use_torch_compile", true)?;
-            kwargs.set_item("use_accel", true)?;
+            // Optimization flags - configurable via environment variables (default: enabled)
+            let use_fp16 = std::env::var("TARS_FP16")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(true);
+            let use_torch_compile = std::env::var("TARS_TORCH_COMPILE")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(true);
+            let use_accel = std::env::var("TARS_ACCEL")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(true);
+
+            kwargs.set_item("use_fp16", use_fp16)?;
+            kwargs.set_item("use_torch_compile", use_torch_compile)?;
+            kwargs.set_item("use_accel", use_accel)?;
+
+            println!("Model config: use_fp16={}, use_torch_compile={}, use_accel={}", 
+                     use_fp16, use_torch_compile, use_accel);
 
             let model = cls.call((), Some(&kwargs))?;
             println!("Model loaded successfully!");
