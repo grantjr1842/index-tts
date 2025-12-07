@@ -465,10 +465,20 @@ class UnifiedVoice(nn.Module):
         )
 
         if self.use_accel and torch.cuda.is_available():
-            # Check if flash attention is available
+            # Check for Ampere or newer (Capability 8.0+)
             try:
-                import flash_attn
-                from indextts.accel import GPT2AccelModel, AccelInferenceEngine
+                major, _ = torch.cuda.get_device_capability(0)
+                if major < 8:
+                    print(f"Flash Attention requires Ampere (8.0) or newer GPU. Detected capability {major}.x. Disabling acceleration.")
+                    self.use_accel = False
+            except Exception as e:
+                print(f"Failed to check GPU capability: {e}. Proceeding carefully...")
+
+            if self.use_accel:
+                # Check if flash attention is available
+                try:
+                    import flash_attn
+                    from indextts.accel import GPT2AccelModel, AccelInferenceEngine
 
                 # Create accel model
                 accel_gpt = GPT2AccelModel(gpt_config)
