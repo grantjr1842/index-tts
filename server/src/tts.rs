@@ -70,8 +70,11 @@ impl TtsModel {
     }
 
     pub fn infer(&self, params: TtsParams) -> PyResult<Vec<u8>> {
+        let total_start = std::time::Instant::now();
+        let text_len = params.text.len();
+        
         #[allow(deprecated)]
-        Python::with_gil(|py| {
+        let result = Python::with_gil(|py| {
             let model = self.model.bind(py);
             let kwargs = PyDict::new(py);
 
@@ -93,22 +96,45 @@ impl TtsModel {
             )?;
             kwargs.set_item("return_audio", true)?;
             kwargs.set_item("return_numpy", true)?;
+            kwargs.set_item("verbose", true)?;  // Enable Python-side timing logs
 
+            let infer_start = std::time::Instant::now();
             let result = model.call_method("infer", (), Some(&kwargs))?;
+            let infer_duration = infer_start.elapsed();
+            
+            // Get RTF from Python result if available
+            let rtf = result.getattr("rtf")
+                .ok()
+                .and_then(|r| r.extract::<f64>().ok())
+                .unwrap_or(0.0);
+            let duration_sec = result.getattr("duration_sec")
+                .ok()
+                .and_then(|r| r.extract::<f64>().ok())
+                .unwrap_or(0.0);
+            
+            println!("[TIMING] Python infer: {:?}, RTF: {:.4}, audio_duration: {:.2}s", 
+                     infer_duration, rtf, duration_sec);
 
             // result is InferenceResult. audio is numpy array.
             let audio_numpy = result.getattr("audio")?;
             let sr = result.getattr("sampling_rate")?.extract::<i32>()?;
 
+            let encode_start = std::time::Instant::now();
             let sf = py.import("soundfile")?;
             let io = py.import("io")?;
             let buffer = io.call_method0("BytesIO")?;
 
             sf.call_method1("write", (&buffer, audio_numpy, sr, "WAV"))?;
             let bytes = buffer.call_method0("getvalue")?.extract::<Vec<u8>>()?;
+            let encode_duration = encode_start.elapsed();
+            
+            println!("[TIMING] WAV encoding: {:?}, bytes: {}", encode_duration, bytes.len());
 
             Ok(bytes)
-        })
+        });
+        
+        println!("[TIMING] Total infer (text_len={}): {:?}", text_len, total_start.elapsed());
+        result
     }
 
     pub fn infer_stream(&self, params: TtsParams) -> PyResult<Py<PyAny>> {
