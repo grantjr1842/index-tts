@@ -305,9 +305,10 @@ class IndexTTS2:
 
         # get channel_size
         channel_size = wavs[0].size(0)
+        device = wavs[0].device
         # get silence tensor
         sil_dur = int(sampling_rate * interval_silence / 1000.0)
-        return torch.zeros(channel_size, sil_dur)
+        return torch.zeros(channel_size, sil_dur, device=device)
 
     def insert_interval_silence(self, wavs, sampling_rate=22050, interval_silence=200):
         """
@@ -320,9 +321,10 @@ class IndexTTS2:
 
         # get channel_size
         channel_size = wavs[0].size(0)
+        device = wavs[0].device
         # get silence tensor
         sil_dur = int(sampling_rate * interval_silence / 1000.0)
-        sil_tensor = torch.zeros(channel_size, sil_dur)
+        sil_tensor = torch.zeros(channel_size, sil_dur, device=device)
 
         wavs_list = []
         for i, wav in enumerate(wavs):
@@ -450,7 +452,7 @@ class IndexTTS2:
                 self.cache_s2mel_style = None
                 self.cache_s2mel_prompt = None
                 self.cache_mel = None
-                torch.cuda.empty_cache()
+                # torch.cuda.empty_cache() # Removed for performance
             audio,sr = self._load_and_cut_audio(spk_audio_prompt,15,verbose)
             audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
             audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
@@ -504,7 +506,7 @@ class IndexTTS2:
         if self.cache_emo_cond is None or self.cache_emo_audio_prompt != emo_audio_prompt:
             if self.cache_emo_cond is not None:
                 self.cache_emo_cond = None
-                torch.cuda.empty_cache()
+                # torch.cuda.empty_cache() # Removed for performance
             emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt,15,verbose,sr=16000)
             emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
             emo_input_features = emo_inputs["input_features"]
@@ -685,12 +687,19 @@ class IndexTTS2:
                 if verbose:
                     logger.debug(f"wav shape: {wav.shape} min: {wav.min()} max: {wav.max()}")
                 # wavs.append(wav[:, :-512])
-                wavs.append(wav.cpu())  # to cpu before saving
+                if verbose:
+                    logger.debug(f"wav shape: {wav.shape} min: {wav.min()} max: {wav.max()}")
+                # wavs.append(wav[:, :-512])
+                
                 if stream_return:
                     yield wav.cpu()
                     if silence == None:
-                        silence = self.interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
+                        # Pass a list containing current wav to get correct device/channels
+                        silence = self.interval_silence([wav], sampling_rate=sampling_rate, interval_silence=interval_silence).cpu()
                     yield silence
+                else:
+                    wavs.append(wav) # Keep on GPU until end
+
         end_time = time.perf_counter()
 
         self._set_gr_progress(0.9, "saving audio...")
