@@ -5,7 +5,7 @@ use std::path::Path;
 
 #[derive(Clone)]
 pub struct TtsModel {
-    model: Arc<PyObject>,
+    model: Arc<Py<PyAny>>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ impl TtsModel {
             
             let model = cls.call((), Some(&kwargs))?;
             println!("Model loaded successfully!");
-            Ok::<PyObject, PyErr>(model.into())
+            Ok::<Py<PyAny>, PyErr>(model.into())
         })?;
 
         Ok(Self {
@@ -88,6 +88,33 @@ impl TtsModel {
             let bytes = buffer.call_method0("getvalue")?.extract::<Vec<u8>>()?;
             
             Ok(bytes)
+        })
+    }
+
+    pub fn infer_stream(&self, params: TtsParams) -> PyResult<Py<PyAny>> {
+        Python::with_gil(|py| {
+            let model = self.model.bind(py);
+            let kwargs = PyDict::new(py);
+            
+            if !Path::new(&params.ref_audio).exists() {
+                return Err(PyErr::new::<pyo3::exceptions::PyFileNotFoundError, _>(
+                    format!("Reference audio not found: {}", params.ref_audio)
+                ));
+            }
+
+            kwargs.set_item("text", params.text)?;
+            kwargs.set_item("spk_audio_prompt", params.ref_audio)?;
+            kwargs.set_item("output_path", py.None())?;
+            kwargs.set_item("temperature", params.temperature)?;
+            kwargs.set_item("top_p", params.top_p)?;
+            kwargs.set_item("top_k", params.top_k)?;
+            kwargs.set_item("max_text_tokens_per_segment", params.max_text_tokens_per_segment)?;
+            kwargs.set_item("stream_return", true)?;
+
+            let generator = model.call_method("infer", (), Some(&kwargs))?;
+            
+            // Return the generator object to be iterated in Rust
+            Ok(generator.unbind())
         })
     }
 }
