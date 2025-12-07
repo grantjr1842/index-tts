@@ -55,6 +55,7 @@ pnpm-debug.log*
 /checkpoints/*
 !/checkpoints/*.yaml
 /archive/
+*.log
 
 # Large Files / Artifacts
 *.wav
