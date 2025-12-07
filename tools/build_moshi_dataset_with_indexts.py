@@ -142,6 +142,8 @@ class WorkerConfig:
     deterministic: bool = False
     no_sampling: bool = False
     seed: Optional[int] = None
+    resume: bool = False
+    dedup: bool = True
 
 
 @dataclass
@@ -168,6 +170,7 @@ WorkerMessage = Union[
     tuple[Literal["ok"], SynthesisResult],
     tuple[Literal["error", "fatal"], dict[str, Any]],
     tuple[Literal["worker_exit"], int],
+    tuple[Literal["existing"], tuple[str, float]],  # New message type for resumed samples
 ]
 
 
@@ -420,6 +423,8 @@ class PipelineConfig:
     assistant_prompt: Optional[str]
     keep_temp: bool
     max_samples: Optional[int]
+    resume: bool = False
+    dedup: bool = True
     
     def validate(self) -> None:
         """Validate pipeline configuration."""
@@ -854,6 +859,8 @@ def _build_dataset_parallel(
         assistant_prompt=assistant_prompt,
         keep_temp=keep_temp,
         max_samples=max_samples,
+        resume=worker_cfg.resume,
+        dedup=worker_cfg.dedup,
     )
     pipeline_config.validate()
     
@@ -893,16 +900,53 @@ def _build_dataset_parallel(
             # Start planner thread
             def planner_loop():
                 nonlocal pipeline_logic
+                seen_ids: set[str] = set()
+                
                 try:
                     with open(pipeline_config.input_jsonl, "r", encoding="utf-8") as f_in:
                         for line_idx, line in enumerate(f_in):
                             if manager.stop_event.is_set():
                                 break
+                            # Logic change: max_samples check should perhaps happen after dedup/skip?
+                            # But original logic was strictly on lines processed.
+                            # We'll keep line-count check for consistency, or move it?
+                            # Let's keep strict line count for now, but be aware.
                             if max_samples is not None and line_idx >= max_samples:
                                 break
                             
-                            data = json.loads(line.strip())
+                            try:
+                                data = json.loads(line.strip())
+                            except json.JSONDecodeError:
+                                continue # Skip invalid lines
+                                
                             sample_id = data.get("sample_id", data.get("id", f"sample_{line_idx}"))
+                            
+                            # Deduplication
+                            if pipeline_config.dedup:
+                                if sample_id in seen_ids:
+                                    # logger.debug(f"Skipping duplicate sample_id: {sample_id}")
+                                    continue
+                                seen_ids.add(sample_id)
+                            
+                            # Resume check
+                            if pipeline_config.resume:
+                                stereo_abs_path = pipeline_config.stereo_dir / f"{sample_id}.wav"
+                                if stereo_abs_path.exists():
+                                    try:
+                                        # Get duration from existing file
+                                        info = sf.info(str(stereo_abs_path))
+                                        duration = info.duration
+                                        # Send existing message to main loop
+                                        # Use the result queue directly
+                                        manager.get_result_queue().put(
+                                            ("existing", (sample_id, duration))
+                                        )
+                                        continue
+                                    except Exception as e:
+                                        logger.warning(
+                                            f"Could not read existing file {stereo_abs_path}, regenerating. Error: {e}"
+                                        )
+                                        # Fall through to generation
                             
                             # Plan user synthesis
                             user_task = SynthesisTask(
@@ -953,6 +997,30 @@ def _build_dataset_parallel(
                             pipeline_logic.outstanding[sample_id][role] = result
                             if len(pipeline_logic.outstanding[sample_id]) == 2:
                                 finalize_sample(sample_id, index_f)
+                    elif msg_type == "existing":
+                        # Handle resumed/existing sample
+                        sample_id, duration = msg_data
+                        
+                        # Add to manifest
+                        stereo_rel_path = Path("data_stereo") / f"{sample_id}.wav"
+                        pipeline_logic.manifest_buffer.append(
+                            {
+                                "path": str(stereo_rel_path).replace(os.sep, "/"),
+                                "duration": float(duration),
+                            }
+                        )
+                        if len(pipeline_logic.manifest_buffer) >= worker_setup.manifest_buffer_size:
+                            flush_manifest(index_f)
+                            
+                        # Update stats
+                        pipeline_logic.total_samples += 1
+                        pipeline_logic.total_duration += duration
+                        pipeline_logic.samples_completed += 1
+                        
+                        # Print progress (force print for resumed to show activity if fast)
+                        # or rely on timed updates. Let's rely on timed to avoid spam if many exist.
+                        pipeline_logic.print_progress(sample_id, duration, force=False)
+                        
                     elif msg_type == "error":
                         logger.error(f"Worker error: {msg_data}")
                         manager.stop_event.set()
@@ -1029,6 +1097,8 @@ def _build_dataset_parallel_threaded(
         assistant_prompt=assistant_prompt,
         keep_temp=keep_temp,
         max_samples=max_samples,
+        resume=worker_cfg.resume,
+        dedup=worker_cfg.dedup,
     )
     pipeline_config.validate()
     
@@ -1412,6 +1482,8 @@ def build_dataset(
     seed: Optional[int] = None,
     deterministic: bool = False,
     no_sampling: bool = False,
+    resume: bool = False,
+    dedup: bool = True,
 ):
     """
     Build a moshi-finetune compatible dataset using IndexTTS2.
@@ -1476,6 +1548,8 @@ def build_dataset(
         deterministic=deterministic,
         no_sampling=no_sampling,
         seed=seed,
+        resume=resume,
+        dedup=dedup,
     )
 
     max_gpu_concurrency = max(1, int(max_gpu_concurrency or 1))
@@ -1734,6 +1808,16 @@ def main():
         action="store_true",
         help="Disable stochastic sampling in IndexTTS2 (sets do_sample=False, top_p=1.0, etc.) for deterministic output.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume build by skipping already generated stereo files (checks existence in stereo_dir).",
+    )
+    parser.add_argument(
+        "--no-dedup",
+        action="store_true",
+        help="Disable input deduplication (by default, duplicate sample_ids are skipped).",
+    )
 
     args = parser.parse_args()
     
@@ -1765,6 +1849,8 @@ def main():
         seed=args.seed,
         deterministic=args.deterministic,
         no_sampling=args.no_sampling,
+        resume=args.resume,
+        dedup=not args.no_dedup,
     )
 
 
