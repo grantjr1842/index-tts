@@ -62,6 +62,38 @@ async fn main() -> anyhow::Result<()> {
 
     let tts_model = TtsModel::new().expect("Failed to load TTS model");
 
+    // Warmup: Perform a dummy inference to cache speaker embeddings and trigger torch.compile
+    let warmup_enabled = std::env::var("TARS_WARMUP")
+        .map(|v| v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(true);
+    
+    if warmup_enabled {
+        println!("Starting warmup inference...");
+        let ref_audio = std::env::var("TARS_REFERENCE_AUDIO")
+            .unwrap_or_else(|_| "interstellar-tars-01-resemble-denoised.wav".to_string());
+        
+        let warmup_params = TtsParams {
+            text: "Warming up.".to_string(),
+            ref_audio,
+            temperature: 0.8,
+            top_p: 0.8,
+            top_k: 30,
+            max_text_tokens_per_segment: 120,
+        };
+        
+        let warmup_start = std::time::Instant::now();
+        match tts_model.infer(warmup_params) {
+            Ok(_) => {
+                println!("Warmup completed in {:?}", warmup_start.elapsed());
+            }
+            Err(e) => {
+                eprintln!("Warmup inference failed (non-fatal): {}", e);
+            }
+        }
+    } else {
+        println!("Warmup disabled via TARS_WARMUP=0");
+    }
+
     let state = AppState { tts_model };
 
     let app = Router::new()
