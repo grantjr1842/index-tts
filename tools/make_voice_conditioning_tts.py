@@ -2,6 +2,12 @@
 import argparse
 import torch
 import torchaudio
+import warnings
+
+# Suppress specific TorchAudio warnings
+warnings.filterwarnings("ignore", message=".*load_with_torchcodec.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*StreamingMediaDecoder.*", category=UserWarning)
+
 from pathlib import Path
 from moshi.models import loaders
 from safetensors.torch import save_file
@@ -20,7 +26,11 @@ def main():
     mimi.eval()
     
     print(f"Processing {args.audio_file}...")
-    wav, sr = torchaudio.load(args.audio_file)
+    try:
+        # Prefer TorchCodec path to avoid deprecated torchaudio.load warnings.
+        wav, sr = torchaudio.load_with_torchcodec(str(args.audio_file), channels_first=True)
+    except Exception:
+        wav, sr = torchaudio.load(args.audio_file)
     
     # Resample if needed
     if sr != mimi.sample_rate:

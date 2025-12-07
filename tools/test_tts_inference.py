@@ -5,6 +5,11 @@ import torchaudio
 import numpy as np
 import os
 import logging
+import warnings
+
+# Suppress TorchAudio warnings
+warnings.filterwarnings("ignore", message=".*load_with_torchcodec.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*StreamingMediaDecoder.*", category=UserWarning)
 
 # Suppress Torch Inductor warnings (RTX 20xx compatibility)
 os.environ["TORCHINDUCTOR_MAX_AUTOTUNE"] = "no"
