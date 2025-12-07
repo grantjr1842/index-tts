@@ -116,3 +116,8 @@ name = "pytorch-cuda"
 url = "https://download.pytorch.org/whl/cu128"
 # Only use this index when explicitly requested by `tool.uv.sources`.
 explicit = true
+
+[dependency-groups]
+dev = [
+    "aiohttp>=3.13.2",
+]

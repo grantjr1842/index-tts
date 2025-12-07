@@ -20,18 +20,25 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
+print("Importing omegaconf...")
 from omegaconf import OmegaConf
 
+print("Importing indextts.gpt.model_v2...")
 from indextts.gpt.model_v2 import UnifiedVoice
+print("Importing indextts.utils.maskgct_utils...")
 from indextts.utils.maskgct_utils import build_semantic_model, build_semantic_codec
+print("Importing indextts.utils.checkpoint...")
 from indextts.utils.checkpoint import load_checkpoint
+print("Importing indextts.utils.front...")
 from indextts.utils.front import TextNormalizer, TextTokenizer
 
+print("Importing indextts.s2mel.modules...")
 from indextts.s2mel.modules.commons import load_checkpoint2, MyModel
 from indextts.s2mel.modules.bigvgan import bigvgan
 from indextts.s2mel.modules.campplus.DTDNN import CAMPPlus
 from indextts.s2mel.modules.audio import mel_spectrogram
 
+print("Importing transformers/modelscope...")
 from transformers import AutoTokenizer
 from modelscope import AutoModelForCausalLM
 from huggingface_hub import hf_hub_download
@@ -40,7 +47,7 @@ from transformers import SeamlessM4TFeatureExtractor
 import random
 import torch.nn.functional as F
 
-
+print("Imports done.")
 logger = get_logger()
 
 @dataclass
@@ -98,14 +105,19 @@ class IndexTTS2:
         self.stop_mel_token = self.cfg.gpt.stop_mel_token
         self.use_accel = use_accel
         self.use_torch_compile = use_torch_compile
-
+        self.use_cuda_kernel = False # Force disable to avoid hang
+        
         self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path))
 
+        logger.info("Initializing UnifiedVoice...")
         self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
+        logger.info(f"Loading checkpoint from {self.gpt_path}...")
         load_checkpoint(self.gpt, self.gpt_path)
+        logger.info(f"Moving GPT to {self.device}...")
         self.gpt = self.gpt.to(self.device)
         if self.use_fp16:
+            logger.info("Converting GPT to fp16...")
             self.gpt.eval().half()
         else:
             self.gpt.eval()
@@ -119,6 +131,7 @@ class IndexTTS2:
                 logger.warning(f">> Failed to load DeepSpeed. Falling back to normal inference. Error: {e}")
 
         self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16)
+        logger.info("GPT config post-initialized")
 
         if self.use_cuda_kernel:
             # preload the CUDA kernel for BigVGAN
@@ -130,14 +143,17 @@ class IndexTTS2:
                 logger.warning(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
                 logger.warning(f"{e!r}")
                 self.use_cuda_kernel = False
-
+        
+        logger.info("Loading Feature Extractor...")
         self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
+        logger.info(">> Loaded Feature Extractor")
         self.semantic_model, self.semantic_mean, self.semantic_std = build_semantic_model(
             os.path.join(self.model_dir, self.cfg.w2v_stat))
         self.semantic_model = self.semantic_model.to(self.device)
         self.semantic_model.eval()
         self.semantic_mean = self.semantic_mean.to(self.device)
         self.semantic_std = self.semantic_std.to(self.device)
+        logger.info(">> Loaded Semantic Model")
 
         semantic_codec = build_semantic_codec(self.cfg.semantic_codec)
         semantic_code_ckpt = hf_hub_download("amphion/MaskGCT", filename="semantic_codec/model.safetensors")
@@ -763,13 +779,17 @@ def find_most_similar_cosine(query_vector, matrix):
 
 class QwenEmotion:
     def __init__(self, model_dir):
+        logger.info(f"Loading QwenEmotion from {model_dir}")
         self.model_dir = model_dir
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir, local_files_only=True, trust_remote_code=True)
+        logger.info("Loaded QwenTokenizer")
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_dir,
-            torch_dtype="float16",  # "auto"
-            device_map="auto"
-        )
+            self.model_dir, 
+            device_map="auto", 
+            trust_remote_code=True, 
+            local_files_only=True
+        ).eval()
+        logger.info("Loaded QwenModel")
         self.prompt = "文本情感分类"
         self.cn_key_to_en = {
             "高兴": "happy",

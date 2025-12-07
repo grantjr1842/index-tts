@@ -41,8 +41,10 @@ impl TtsModel {
             let device = std::env::var("TARS_DEVICE").unwrap_or_else(|_| "cuda:0".to_string());
             kwargs.set_item("device", device)?;
 
-            // Match serve_tars.py defaults
+            // Match serve_tars.py defaults and enable optimizations
             kwargs.set_item("use_fp16", true)?;
+            kwargs.set_item("use_torch_compile", true)?;
+            kwargs.set_item("use_accel", true)?;
 
             let model = cls.call((), Some(&kwargs))?;
             println!("Model loaded successfully!");

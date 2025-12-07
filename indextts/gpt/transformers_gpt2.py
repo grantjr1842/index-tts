@@ -21,19 +21,24 @@ import warnings
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
+print("transformers_gpt2: Importing torch...")
 import torch
 import torch.utils.checkpoint
 from packaging import version
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
+print("transformers_gpt2: Importing transformers.activations...")
 from transformers.activations import ACT2FN
 import transformers
 
+print("transformers_gpt2: Importing local generation utils...")
 from indextts.gpt.transformers_generation_utils import GenerationMixin
+print("transformers_gpt2: Importing local modeling utils...")
 from indextts.gpt.transformers_modeling_utils import PreTrainedModel
 from transformers.modeling_utils import SequenceSummary
 
+print("transformers_gpt2: Importing attn_mask_utils...")
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa, _prepare_4d_causal_attention_mask_for_sdpa
 from transformers.modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
@@ -44,6 +49,7 @@ from transformers.modeling_outputs import (
 )
 # from transformers.modeling_utils import PreTrainedModel, SequenceSummary
 
+print("transformers_gpt2: Importing pytorch_utils...")
 from transformers.pytorch_utils import Conv1D, find_pruneable_heads_and_indices, prune_conv1d_layer
 from transformers.utils import (
     ModelOutput,
@@ -56,6 +62,7 @@ from transformers.utils import (
     logging,
     replace_return_docstrings,
 )
+print("transformers_gpt2: Imports done.")
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from transformers.models.gpt2.configuration_gpt2 import GPT2Config
 

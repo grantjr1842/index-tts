@@ -16,7 +16,12 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 # IndexTTS imports
+from indextts.logging import setup_logging
+print("Setting up logging...")
+setup_logging()
+print("Importing IndexTTS2...")
 from indextts.infer_v2 import IndexTTS2
+print("IndexTTS2 imported.")
 
 CACHE_DIR = os.path.join("outputs", "cache")
 TARS_REFERENCE_AUDIO = os.path.abspath(
@@ -170,15 +175,14 @@ def _blocking_infer(request: TTSRequest) -> Tuple[bytes, int, Dict[str, Any]]:
 async def _with_concurrency_limit(coro):
     if concurrency_sem is None:
         return await coro
-    try:
-        concurrency_sem.acquire_nowait()
-    except asyncio.LimitOverrunError:
-        raise
-    except Exception:
+    
+    if concurrency_sem.locked():
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Server is busy, please retry.",
         )
+    
+    await concurrency_sem.acquire()
     try:
         return await coro
     finally:
@@ -257,4 +261,5 @@ async def readyz():
     return {"ready": ready, "ref_audio": TARS_REFERENCE_AUDIO, "device": settings.device}
 
 if __name__ == "__main__":
+    print("Starting Uvicorn...")
     uvicorn.run(app, host="0.0.0.0", port=8009)
