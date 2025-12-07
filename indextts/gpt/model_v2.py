@@ -467,10 +467,12 @@ class UnifiedVoice(nn.Module):
         if self.use_accel and torch.cuda.is_available():
             # Check for Ampere or newer (Capability 8.0+)
             try:
-                major, _ = torch.cuda.get_device_capability(0)
-                if major < 8:
-                    print(f"Flash Attention requires Ampere (8.0) or newer GPU. Detected capability {major}.x. Disabling acceleration.")
+                major, minor = torch.cuda.get_device_capability(0)
+                if major < 8 and not (major == 7 and minor >= 5):
+                    print(f"Flash Attention requires Turing (7.5)+ or Ampere (8.0)+ GPU. Detected capability {major}.{minor}. Disabling acceleration.")
                     self.use_accel = False
+                elif major == 7:
+                    print(f"Detected Turing GPU ({major}.{minor}). FlashAttention is experimental on this architecture.")
             except Exception as e:
                 print(f"Failed to check GPU capability: {e}. Proceeding carefully...")
 
@@ -480,35 +482,35 @@ class UnifiedVoice(nn.Module):
                     import flash_attn
                     from indextts.accel import GPT2AccelModel, AccelInferenceEngine
 
-                # Create accel model
-                accel_gpt = GPT2AccelModel(gpt_config)
-                accel_gpt.load_state_dict(self.gpt.state_dict(), strict=False)
+                    # Create accel model
+                    accel_gpt = GPT2AccelModel(gpt_config)
+                    accel_gpt.load_state_dict(self.gpt.state_dict(), strict=False)
 
-                if half:
-                    accel_gpt = accel_gpt.half().cuda()
-                else:
-                    accel_gpt = accel_gpt.cuda()
-                accel_gpt.eval()
+                    if half:
+                        accel_gpt = accel_gpt.half().cuda()
+                    else:
+                        accel_gpt = accel_gpt.cuda()
+                    accel_gpt.eval()
 
-                lm_head_with_norm = nn.Sequential(self.final_norm, self.mel_head)
-                self.accel_engine = AccelInferenceEngine(
-                    model=accel_gpt,
-                    lm_head=lm_head_with_norm,
-                    num_layers=self.layers,
-                    num_heads=self.heads,
-                    head_dim=self.model_dim // self.heads,
-                    block_size=256,
-                    # Reduce to save memory (16*256 = 4096 tokens capacity)
-                    num_blocks=16,
-                    use_cuda_graph=True,
-                )
-                print("acceleration engine initialized")
-            except ImportError:
-                 print("flash_attn not found. Disabling acceleration.")
-                 self.use_accel = False
-            except Exception as e:
-                print(f"Failed to initialize acceleration: {e}. Disabling acceleration.")
-                self.use_accel = False
+                    lm_head_with_norm = nn.Sequential(self.final_norm, self.mel_head)
+                    self.accel_engine = AccelInferenceEngine(
+                        model=accel_gpt,
+                        lm_head=lm_head_with_norm,
+                        num_layers=self.layers,
+                        num_heads=self.heads,
+                        head_dim=self.model_dim // self.heads,
+                        block_size=256,
+                        # Reduce to save memory (16*256 = 4096 tokens capacity)
+                        num_blocks=16,
+                        use_cuda_graph=True,
+                    )
+                    print("acceleration engine initialized")
+                except ImportError:
+                     print("flash_attn not found. Disabling acceleration.")
+                     self.use_accel = False
+                except Exception as e:
+                    print(f"Failed to initialize acceleration: {e}. Disabling acceleration.")
+                    self.use_accel = False
         self.inference_model = GPT2InferenceModel(
             gpt_config,
             self.gpt,

@@ -32,7 +32,16 @@ elif command -v python &> /dev/null; then
         echo "Detected GPU compute capability: $GPU_CAP"
         export TORCH_CUDA_ARCH_LIST="$GPU_CAP"
         echo "Set TORCH_CUDA_ARCH_LIST=$GPU_CAP"
+        
+        # Check for Turing (7.5) to enable experimental FlashAttention build
+        if [ "$GPU_CAP" == "7.5" ]; then
+             echo "Turing GPU detected. Enabling experimental FlashAttention build (Force Source Build)."
+             export FLASH_ATTENTION_FORCE_BUILD="TRUE"
+             # Force uv to build flash-attn from source
+             export UV_NO_BINARY="flash-attn"
+        fi
     fi
+
 fi
 
 echo "Syncing dependencies with extras: deepspeed, flash-attn"
