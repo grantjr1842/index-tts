@@ -16,8 +16,8 @@ echo "Starting server with optimizations..."
 export TARS_DEVICE="cuda:0"
 export TARS_FP16=1
 export TARS_TORCH_COMPILE=1
-export TARS_ACCEL=0 # flash_attn not installed
-export TARS_DEEPSPEED=0 # crash on init
+export TARS_ACCEL=1
+export TARS_DEEPSPEED=1
 export TARS_WARMUP=1
 
 ./server/target/release/server
