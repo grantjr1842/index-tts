@@ -1,11 +1,15 @@
 """Core inference orchestration logic for IndexTTS."""
+import hashlib
+import json
 import os
-import time
+import shutil
 from typing import Any, Optional, cast
 
 import gradio as gr
 
 from indextts.types import IndexTTS2Client, InferFn, NormalizeEmoVecFn
+
+CACHE_DIR = os.path.join("outputs", "cache")
 
 
 def generate_speech(
@@ -65,8 +69,7 @@ def generate_speech(
     Returns:
         Path to the generated audio file
     """
-    if not output_path:
-        output_path = os.path.join("outputs", f"spk_{int(time.time())}.wav")
+    os.makedirs(CACHE_DIR, exist_ok=True)
 
     kwargs: dict[str, float | int | bool | None] = {
         "do_sample": bool(do_sample),
@@ -98,13 +101,48 @@ def generate_speech(
         # erase empty emotion descriptions; `infer()` will then automatically use the main prompt
         emo_text = None
 
+    cache_payload: dict[str, Any] = {
+        "emo_control_method": emo_control_method,
+        "prompt": prompt,
+        "text": text,
+        "emo_ref_path": emo_ref_path,
+        "emo_weight": emo_weight,
+        "vec": vec,
+        "emo_text": emo_text,
+        "emo_random": bool(emo_random),
+        "max_text_tokens_per_segment": int(max_text_tokens_per_segment),
+        "generation": kwargs,
+        "model_version": getattr(tts, "model_version", None),
+    }
+    cache_key = hashlib.sha256(
+        json.dumps(cache_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    cache_path = os.path.join(CACHE_DIR, f"{cache_key}.wav")
+
+    if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 0:
+        print(f"Cache hit for key {cache_key}, returning cached audio at {cache_path}")
+        if output_path and os.path.abspath(output_path) != os.path.abspath(cache_path):
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+            shutil.copy2(cache_path, output_path)
+            return output_path
+        return cache_path
+
+    generation_path = cache_path
+    if output_path and os.path.abspath(output_path) == os.path.abspath(cache_path):
+        generation_path = output_path
+    elif output_path:
+        # still generate into cache, then copy to user-provided location
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    else:
+        output_path = cache_path
+
     print(f"Emo control mode:{emo_control_method},weight:{emo_weight},vec:{vec}")
     
     infer_fn: InferFn = cast(InferFn, tts.infer)
     output: Any = infer_fn(
         spk_audio_prompt=prompt,
         text=text,
-        output_path=output_path,
+        output_path=generation_path,
         emo_audio_prompt=emo_ref_path,
         emo_alpha=emo_weight,
         emo_vector=vec,
@@ -115,5 +153,9 @@ def generate_speech(
         max_text_tokens_per_segment=int(max_text_tokens_per_segment),
         **kwargs,
     )
-    
-    return output
+
+    if output_path and os.path.abspath(output_path) != os.path.abspath(generation_path):
+        if os.path.isfile(generation_path):
+            shutil.copy2(generation_path, output_path)
+            return output_path
+    return output or generation_path
