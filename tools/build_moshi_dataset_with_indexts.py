@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python
 from __future__ import annotations
 
@@ -6,25 +5,33 @@ import argparse
 import contextlib
 import hashlib
 import json
-import os
-from dataclasses import dataclass
+import logging
 import multiprocessing as mp
-from multiprocessing.process import BaseProcess
+import os
 import queue
+import sys
 import threading
-from pathlib import Path
 import time
-from typing import Any, IO, Literal, Optional, Protocol, TypedDict, Union, cast
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import IO, Any, Literal, Optional, Protocol, Union, cast, TypedDict
 
 import numpy as np
 import numpy.typing as npt
-from numpy.typing import NDArray
+import librosa
 import soundfile as sf  # type: ignore[import-untyped]
+import torch
 
-from indextts.infer_v2 import IndexTTS2
+try:
+    from indextts.infer_v2 import IndexTTS2
+except ImportError:
+    # This script might be run where indextts is not installed/importable
+    # but we handle that dynamically below or via mock_inference
+    IndexTTS2 = None  # type: ignore
 
-AudioArray = NDArray[np.float32]
-Float64Array = NDArray[np.float64]
+AudioArray = npt.NDArray[np.float32]
+Float64Array = npt.NDArray[np.float64]
 
 
 class SoundFileModule(Protocol):
@@ -139,9 +146,9 @@ class SynthesisTask:
     sample_id: str
     role: Literal["user", "assistant"]
     text: str
-    spk_audio_prompt: Optional[str]
-    emo_audio_prompt: Optional[str]
-    emo_vector: Optional[list[float]]
+    spk_audio_prompt: Optional[str] = None
+    emo_audio_prompt: Optional[str] = None
+    emo_vector: Optional[list[float]] = None
     emo_alpha: float = 1.0
 
 
@@ -449,9 +456,9 @@ def _validate_worker_config(cfg: WorkerConfig) -> None:
     if cfg.mock_inference:
         return
     
-    if not cfg.cfg_path.exists():
+    if not Path(cfg.cfg_path).exists():
         raise FileNotFoundError(f"Config file not found: {cfg.cfg_path}")
-    if not cfg.model_dir.exists():
+    if not Path(cfg.model_dir).exists():
         raise FileNotFoundError(f"Model directory not found: {cfg.model_dir}")
     
     # Validate device
@@ -686,6 +693,46 @@ def _synthesis_worker(
     result_queue.put(("worker_exit", worker_id))
 
 
+def _synthesis_worker_threaded(
+    worker_id: int,
+    task_queue: queue.Queue[Optional[SynthesisTask]],
+    result_queue: queue.Queue[WorkerMessage],
+    cfg: WorkerConfig,
+    tts: Optional[IndexTTS2Inferable],
+    gpu_semaphore: Optional[threading.Semaphore] = None,
+    inference_lock: Optional[threading.Lock] = None,
+) -> None:
+    """Threaded worker loop that reuses a shared IndexTTS2 instance."""
+
+    while True:
+        task = task_queue.get()
+        if task is None:
+            break
+        try:
+            res = _run_synthesis_task(
+                task=task,
+                cfg=cfg,
+                tts=tts,
+                inference_lock=inference_lock,
+                gpu_semaphore=gpu_semaphore,
+            )
+            # Construct task_id as expected by the consumer loop
+            task_id = f"{task.sample_id}_{task.role}"
+            result_queue.put(("result", (task_id, res)))
+        except Exception as exc:
+            result_queue.put((
+                "error",
+                {
+                    "worker_id": worker_id,
+                    "sample_id": task.sample_id,
+                    "role": task.role,
+                    "message": str(exc),
+                },
+            ))
+
+    result_queue.put(("worker_exit", worker_id))
+
+
 def _build_dataset_parallel(
     *,
     input_jsonl: Path,
@@ -757,13 +804,13 @@ def _build_dataset_parallel(
                                 break
                             
                             data = json.loads(line.strip())
-                            sample_id = data.get("sample_id", f"sample_{line_idx}")
+                            sample_id = data.get("sample_id", data.get("id", f"sample_{line_idx}"))
                             
                             # Plan user synthesis
                             user_task = SynthesisTask(
                                 sample_id=sample_id,
                                 role="user",
-                                text=data.get("user", ""),
+                                text=data.get("user_text", data.get("user", "")),
                                 spk_audio_prompt=pipeline_config.user_spk_prompt,
                             )
                             if enqueue_task(user_task):
@@ -774,7 +821,7 @@ def _build_dataset_parallel(
                             asst_task = SynthesisTask(
                                 sample_id=sample_id,
                                 role="assistant", 
-                                text=data.get("assistant", ""),
+                                text=data.get("assistant_text", data.get("assistant", "")),
                                 spk_audio_prompt=pipeline_config.assistant_prompt,
                             )
                             if enqueue_task(asst_task):
@@ -904,13 +951,13 @@ def _build_dataset_parallel_threaded(
                                 break
                             
                             data = json.loads(line.strip())
-                            sample_id = data.get("sample_id", f"sample_{line_idx}")
+                            sample_id = data.get("sample_id", data.get("id", f"sample_{line_idx}"))
                             
                             # Plan user synthesis
                             user_task = SynthesisTask(
                                 sample_id=sample_id,
                                 role="user",
-                                text=data.get("user", ""),
+                                text=data.get("user_text", data.get("user", "")),
                                 spk_audio_prompt=pipeline_config.user_spk_prompt,
                             )
                             if enqueue_task(user_task):
@@ -921,7 +968,7 @@ def _build_dataset_parallel_threaded(
                             asst_task = SynthesisTask(
                                 sample_id=sample_id,
                                 role="assistant", 
-                                text=data.get("assistant", ""),
+                                text=data.get("assistant_text", data.get("assistant", "")),
                                 spk_audio_prompt=pipeline_config.assistant_prompt,
                             )
                             if enqueue_task(asst_task):
@@ -1129,6 +1176,9 @@ def _build_dataset_legacy(
             sample_id = sample.get("id", f"sample_{line_idx:06d}")
             user_text = sample["user_text"]
             assistant_text = sample["assistant_text"]
+
+            tmp_user = tmp_dir / f"{sample_id}_user.wav"
+            tmp_asst = tmp_dir / f"{sample_id}_assistant.wav"
 
             tmp_user = tmp_dir / f"{sample_id}_user.wav"
             tmp_asst = tmp_dir / f"{sample_id}_assistant.wav"

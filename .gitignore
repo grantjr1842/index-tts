@@ -54,3 +54,8 @@ coverage/
 pnpm-store/
 
 
+
+# Data & Artifacts
+data/
+test_gen.wav
+**/build/
