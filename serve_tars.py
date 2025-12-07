@@ -90,8 +90,12 @@ async def generate_speech(request: TTSRequest):
         audio_data = result.audio
         sample_rate = result.sampling_rate
         
-        # Convert to WAV bytes
-        # Audio from IndexTTS is likely float32 or int16, soundfile handles numpy arrays well
+        # Audio from IndexTTS is likely float32 but scaled to int16 range [-32767, 32767]
+        # We must cast it to int16 so soundfile interprets it correctly.
+        # If we pass floats > 1.0, soundfile clips them to 1.0 (garbage audio).
+        import numpy as np
+        audio_data = audio_data.astype(np.int16)
+        
         buffer = io.BytesIO()
         sf.write(buffer, audio_data, sample_rate, format='WAV')
         buffer.seek(0)
