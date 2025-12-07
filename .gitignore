@@ -58,3 +58,4 @@ data/
 *.wav
 **/build/
 .agent/
+voice_conditioning_tars.safetensors
