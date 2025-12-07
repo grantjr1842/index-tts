@@ -4,10 +4,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+print("Importing transformers...")
 import transformers
+print("Importing GPT2Config...")
 from transformers import GPT2Config, LogitsProcessorList
+print("Importing Cache...")
 from transformers.cache_utils import Cache, DynamicCache
+print("Importing GenerationMixin...")
 from transformers.generation.utils import GenerationMixin
+print("Importing GPT2PreTrainedModel...")
 from indextts.gpt.transformers_gpt2 import GPT2PreTrainedModel, GPT2Model
 
 # from transformers import GPT2Config, GPT2PreTrainedModel, LogitsProcessorList
@@ -15,10 +20,12 @@ from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 from transformers.utils.model_parallel_utils import (
     assert_device_map, get_device_map)
 
+print("Importing Conformer/Perceiver...")
 from indextts.gpt.conformer_encoder import ConformerEncoder
 from indextts.gpt.perceiver import PerceiverResampler
 from indextts.utils.arch_util import AttentionBlock
 from indextts.utils.typical_sampling import TypicalLogitsWarper
+print("Finished importing indextts.gpt.model_v2")
 
 
 def null_position_embeddings(range, dim):

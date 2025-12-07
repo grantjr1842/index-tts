@@ -41,8 +41,27 @@ impl TtsModel {
             let device = std::env::var("TARS_DEVICE").unwrap_or_else(|_| "cuda:0".to_string());
             kwargs.set_item("device", device)?;
 
-            // Match serve_tars.py defaults
-            kwargs.set_item("use_fp16", true)?;
+            // Optimization flags - configurable via environment variables (default: enabled)
+            let use_fp16 = std::env::var("TARS_FP16")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(true);
+            let use_torch_compile = std::env::var("TARS_TORCH_COMPILE")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(true);
+            let use_accel = std::env::var("TARS_ACCEL")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(true);
+            let use_deepspeed = std::env::var("TARS_DEEPSPEED")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false); // Default to false as it might be unstable
+
+            kwargs.set_item("use_fp16", use_fp16)?;
+            kwargs.set_item("use_torch_compile", use_torch_compile)?;
+            kwargs.set_item("use_accel", use_accel)?;
+            kwargs.set_item("use_deepspeed", use_deepspeed)?;
+
+            println!("Model config: use_fp16={}, use_torch_compile={}, use_accel={}, use_deepspeed={}", 
+                     use_fp16, use_torch_compile, use_accel, use_deepspeed);
 
             let model = cls.call((), Some(&kwargs))?;
             println!("Model loaded successfully!");
@@ -55,8 +74,11 @@ impl TtsModel {
     }
 
     pub fn infer(&self, params: TtsParams) -> PyResult<Vec<u8>> {
+        let total_start = std::time::Instant::now();
+        let text_len = params.text.len();
+        
         #[allow(deprecated)]
-        Python::with_gil(|py| {
+        let result = Python::with_gil(|py| {
             let model = self.model.bind(py);
             let kwargs = PyDict::new(py);
 
@@ -78,22 +100,47 @@ impl TtsModel {
             )?;
             kwargs.set_item("return_audio", true)?;
             kwargs.set_item("return_numpy", true)?;
+            kwargs.set_item("verbose", true)?;  // Enable Python-side timing logs
 
+            let infer_start = std::time::Instant::now();
             let result = model.call_method("infer", (), Some(&kwargs))?;
+            let infer_duration = infer_start.elapsed();
+            
+            // Get RTF from Python result if available
+            let rtf = result.getattr("rtf")
+                .ok()
+                .and_then(|r| r.extract::<f64>().ok())
+                .unwrap_or(0.0);
+            let duration_sec = result.getattr("duration_sec")
+                .ok()
+                .and_then(|r| r.extract::<f64>().ok())
+                .unwrap_or(0.0);
+            
+            println!("[TIMING] Python infer: {:?}, RTF: {:.4}, audio_duration: {:.2}s", 
+                     infer_duration, rtf, duration_sec);
 
             // result is InferenceResult. audio is numpy array.
             let audio_numpy = result.getattr("audio")?;
             let sr = result.getattr("sampling_rate")?.extract::<i32>()?;
 
+            let encode_start = std::time::Instant::now();
             let sf = py.import("soundfile")?;
             let io = py.import("io")?;
             let buffer = io.call_method0("BytesIO")?;
 
-            sf.call_method1("write", (&buffer, audio_numpy, sr, "WAV"))?;
+            let sf_kwargs = PyDict::new(py);
+            sf_kwargs.set_item("format", "WAV")?;
+            sf.call_method("write", (&buffer, audio_numpy, sr), Some(&sf_kwargs))?;
             let bytes = buffer.call_method0("getvalue")?.extract::<Vec<u8>>()?;
+            let encode_duration = encode_start.elapsed();
+            
+            println!("[TIMING] WAV encoding: {:?}, bytes: {}", encode_duration, bytes.len());
 
             Ok(bytes)
-        })
+        });
+        
+        println!("[TIMING] Total infer (text_len={}): {:?}", text_len, total_start.elapsed());
+        result
     }
 
     pub fn infer_stream(&self, params: TtsParams) -> PyResult<Py<PyAny>> {

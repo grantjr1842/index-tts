@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+print("transformers_modeling_utils: Importing standard libs...")
 import collections
 import copy
 import functools
@@ -33,6 +34,7 @@ from threading import Thread
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from zipfile import is_zipfile
 
+print("transformers_modeling_utils: Importing torch...")
 import torch
 from huggingface_hub import split_torch_state_dict_into_shards
 from packaging import version
@@ -44,10 +46,12 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.dynamic_module_utils import custom_object_save
 from transformers.generation import GenerationConfig
 import transformers
+print("transformers_modeling_utils: Importing GenerationMixin...")
 from indextts.gpt.transformers_generation_utils import GenerationMixin
-from transformers.generation import GenerationConfig
+# from transformers.generation import GenerationConfig
 
 
+print("transformers_modeling_utils: Importing integrations...")
 from transformers.integrations import PeftAdapterMixin, deepspeed_config, is_deepspeed_zero3_enabled
 from transformers.loss.loss_utils import LOSS_MAPPING
 from transformers.pytorch_utils import (  # noqa: F401
@@ -63,6 +67,7 @@ from transformers.pytorch_utils import (  # noqa: F401
 from transformers.quantizers import AutoHfQuantizer, HfQuantizer
 from transformers.quantizers.quantizers_utils import get_module_from_name
 from transformers.safetensors_conversion import auto_conversion
+print("transformers_modeling_utils: Importing utils...")
 from transformers.utils import (
     ACCELERATE_MIN_VERSION,
     ADAPTER_SAFE_WEIGHTS_NAME,
@@ -98,14 +103,19 @@ from transformers.utils import (
     replace_return_docstrings,
     strtobool,
 )
+print("transformers_modeling_utils: Imports done.")
+print("transformers_modeling_utils: Importing hub...")
 from transformers.utils.hub import convert_file_size_to_int, create_and_tag_model_card, get_checkpoint_shard_files
+print("transformers_modeling_utils: Importing import_utils...")
 from transformers.utils.import_utils import (
     ENV_VARS_TRUE_VALUES,
     is_sagemaker_mp_enabled,
     is_torch_fx_proxy,
     is_torchdynamo_compiling,
 )
+print("transformers_modeling_utils: Importing quantization_config...")
 from transformers.utils.quantization_config import BitsAndBytesConfig, QuantizationMethod
+print("transformers_modeling_utils: All imports done.")
 
 
 XLA_USE_BF16 = os.environ.get("XLA_USE_BF16", "0").upper()
