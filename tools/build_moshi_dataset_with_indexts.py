@@ -462,9 +462,10 @@ def _validate_worker_config(cfg: WorkerConfig) -> None:
         raise FileNotFoundError(f"Model directory not found: {cfg.model_dir}")
     
     # Validate device
-    valid_devices = ["cpu", "cuda", "cuda:0", "cuda:1", "cuda:2", "cuda:3"]
-    if cfg.device not in valid_devices and not cfg.device.startswith("cuda:"):
-        raise ValueError(f"Invalid device: {cfg.device}")
+    if cfg.device is not None:
+        valid_devices = ["cpu", "cuda", "cuda:0", "cuda:1", "cuda:2", "cuda:3"]
+        if cfg.device not in valid_devices and not cfg.device.startswith("cuda:"):
+            raise ValueError(f"Invalid device: {cfg.device}")
 
 
 # ============================================================================
@@ -487,11 +488,17 @@ class CommonPipelineLogic:
         # Common state
         self.total_samples = 0
         self.total_duration = 0.0
-        self.outstanding: dict[str, dict[str, SynthesisResult]] = {}
+        self.outstanding: dict[str, dict[str, Any]] = {}
         self.manifest_buffer: list[ManifestEntry] = []
         self.start_time = time.perf_counter()
         self.tasks_enqueued = 0
         self.samples_planned = 0
+        
+        # Progress tracking
+        self.samples_completed = 0
+        self.samples_total = 0
+        self.last_progress_update = time.perf_counter()
+        self.last_status_update = time.perf_counter()
         
         # References for common helper functions
         self.total_samples_ref = [self.total_samples]
@@ -517,12 +524,70 @@ class CommonPipelineLogic:
             )
             if result:
                 self.total_samples, self.total_duration = result
+                # Update progress tracking
+                self.samples_completed += 1
+                # Get duration from the result or calculate from total
+                duration = self.total_duration_ref[0] - (self.total_duration if self.total_samples > 1 else 0)
+                # Print progress with the new tracking
+                self.print_progress(sample_id, duration)
 
         def enqueue_task(task: SynthesisTask) -> bool:
             return _common_enqueue_task(
                 task, self.manager.get_task_queue(), self.manager.stop_event, self.tasks_enqueued_ref)
 
         return flush_manifest, finalize_sample, enqueue_task
+    
+    def print_progress(self, sample_id: str, duration: float, force: bool = False) -> None:
+        """Print progress update with rate limiting."""
+        now = time.perf_counter()
+        # Update every second or when forced
+        if not force and (now - self.last_progress_update) < 1.0:
+            return
+        
+        self.last_progress_update = now
+        elapsed = now - self.start_time
+        
+        # Calculate rate (samples per minute)
+        rate = (self.samples_completed / elapsed * 60) if elapsed > 0 else 0
+        
+        # Calculate ETA
+        remaining = self.samples_total - self.samples_completed
+        eta_seconds = (remaining / rate * 60) if rate > 0 else 0
+        eta_min = int(eta_seconds / 60)
+        
+        # Format output
+        progress_pct = int(self.samples_completed / self.samples_total * 100) if self.samples_total > 0 else 0
+        
+        print(
+            f"[{self.samples_completed}/{self.samples_total}] ✓ {sample_id} "
+            f"({duration:.2f}s) | Total: {self.total_duration:.2f}s | "
+            f"Rate: {rate:.1f} samp/min | ETA: {eta_min}min"
+        )
+    
+    def print_status_update(self) -> None:
+        """Print periodic status update."""
+        now = time.perf_counter()
+        # Status update every 10 seconds
+        if (now - self.last_status_update) < 10.0:
+            return
+        
+        self.last_status_update = now
+        elapsed = now - self.start_time
+        progress_pct = int(self.samples_completed / self.samples_total * 100) if self.samples_total > 0 else 0
+        
+        elapsed_min = int(elapsed / 60)
+        elapsed_sec = int(elapsed % 60)
+        
+        remaining = self.samples_total - self.samples_completed
+        rate = (self.samples_completed / elapsed * 60) if elapsed > 0 else 0
+        eta_seconds = (remaining / rate * 60) if rate > 0 else 0
+        eta_min = int(eta_seconds / 60)
+        eta_sec = int(eta_seconds % 60)
+        
+        print(
+            f"[Progress] {self.samples_completed}/{self.samples_total} complete ({progress_pct}%) | "
+            f"Elapsed: {elapsed_min}m{elapsed_sec}s | ETA: {eta_min}m{eta_sec}s"
+        )
     
     def get_final_stats(self) -> tuple[int, float]:
         """Get final processing statistics."""
@@ -533,8 +598,8 @@ class CommonPipelineLogic:
                 f"Pipeline finished with incomplete samples: {missing_ids}"
             )
         print(
-            f"Pipeline complete in {elapsed:.2f}s — samples: {self.total_samples}, "
-            f"total duration: {self.total_duration:.2f}s"
+            f"\n[Complete] Pipeline finished in {elapsed:.2f}s — "
+            f"samples: {self.total_samples}, total duration: {self.total_duration:.2f}s"
         )
         return self.total_samples, self.total_duration
 
@@ -814,7 +879,8 @@ def _build_dataset_parallel(
                                 spk_audio_prompt=pipeline_config.user_spk_prompt,
                             )
                             if enqueue_task(user_task):
-                                pipeline_logic.outstanding[f"{sample_id}_user"] = {"role": "user"}
+                                if sample_id not in pipeline_logic.outstanding:
+                                    pipeline_logic.outstanding[sample_id] = {}
                                 pipeline_logic.samples_planned += 1
                             
                             # Plan assistant synthesis
@@ -825,7 +891,8 @@ def _build_dataset_parallel(
                                 spk_audio_prompt=pipeline_config.assistant_prompt,
                             )
                             if enqueue_task(asst_task):
-                                pipeline_logic.outstanding[f"{sample_id}_assistant"] = {"role": "assistant"}
+                                if sample_id not in pipeline_logic.outstanding:
+                                    pipeline_logic.outstanding[sample_id] = {}
                                 pipeline_logic.samples_planned += 1
                 except Exception as exc:
                     manager.planner_error.put(exc)
@@ -866,6 +933,29 @@ def _build_dataset_parallel(
                     if manager.stop_event.is_set():
                         break
                     continue
+            
+            # CRITICAL FIX: Drain any remaining results from queue after all workers exit
+            # Workers may have put results before their exit messages, so we need to process
+            # any remaining results to prevent "incomplete samples" errors
+            print(f"[Cleanup] All workers exited, draining remaining results from queue...")
+            drained_count = 0
+            while True:
+                try:
+                    msg_type, msg_data = manager.get_result_queue().get(timeout=0.1)
+                    if msg_type == "result":
+                        task_id, result = msg_data
+                        sample_id, role = task_id.rsplit("_", 1)
+                        if sample_id in pipeline_logic.outstanding:
+                            pipeline_logic.outstanding[sample_id][role] = result
+                            if len(pipeline_logic.outstanding[sample_id]) == 2:
+                                finalize_sample(sample_id, index_f)
+                            drained_count += 1
+                    # Ignore other message types during drain
+                except queue.Empty:
+                    break
+            
+            if drained_count > 0:
+                print(f"[Cleanup] Processed {drained_count} remaining results from queue")
             
             flush_manifest(index_f)
         
@@ -961,7 +1051,8 @@ def _build_dataset_parallel_threaded(
                                 spk_audio_prompt=pipeline_config.user_spk_prompt,
                             )
                             if enqueue_task(user_task):
-                                pipeline_logic.outstanding[f"{sample_id}_user"] = {"role": "user"}
+                                if sample_id not in pipeline_logic.outstanding:
+                                    pipeline_logic.outstanding[sample_id] = {}
                                 pipeline_logic.samples_planned += 1
                             
                             # Plan assistant synthesis
@@ -972,7 +1063,8 @@ def _build_dataset_parallel_threaded(
                                 spk_audio_prompt=pipeline_config.assistant_prompt,
                             )
                             if enqueue_task(asst_task):
-                                pipeline_logic.outstanding[f"{sample_id}_assistant"] = {"role": "assistant"}
+                                if sample_id not in pipeline_logic.outstanding:
+                                    pipeline_logic.outstanding[sample_id] = {}
                                 pipeline_logic.samples_planned += 1
                 except Exception as exc:
                     manager.planner_error.put(exc)
@@ -1025,6 +1117,27 @@ def _build_dataset_parallel_threaded(
                     if manager.stop_event.is_set():
                         break
                     continue
+            
+            # CRITICAL FIX: Drain any remaining results from queue after all workers exit
+            print(f"[Cleanup] All workers exited, draining remaining results from queue...")
+            drained_count = 0
+            while True:
+                try:
+                    msg_type, msg_data = manager.get_result_queue().get(timeout=0.1)
+                    if msg_type == "result":
+                        task_id, result = msg_data
+                        sample_id, role = task_id.rsplit("_", 1)
+                        if sample_id in pipeline_logic.outstanding:
+                            pipeline_logic.outstanding[sample_id][role] = result
+                            if len(pipeline_logic.outstanding[sample_id]) == 2:
+                                finalize_sample(sample_id, index_f)
+                            drained_count += 1
+                    # Ignore other message types during drain
+                except queue.Empty:
+                    break
+            
+            if drained_count > 0:
+                print(f"[Cleanup] Processed {drained_count} remaining results from queue")
             
             flush_manifest(index_f)
         
