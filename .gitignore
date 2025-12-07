@@ -53,9 +53,8 @@ coverage/
 .yarn/
 pnpm-store/
 
-
-
 # Data & Artifacts
 data/
-test_gen.wav
+*.wav
 **/build/
+.agent/
