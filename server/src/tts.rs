@@ -51,13 +51,17 @@ impl TtsModel {
             let use_accel = std::env::var("TARS_ACCEL")
                 .map(|v| v == "1" || v.to_lowercase() == "true")
                 .unwrap_or(true);
+            let use_deepspeed = std::env::var("TARS_DEEPSPEED")
+                .map(|v| v == "1" || v.to_lowercase() == "true")
+                .unwrap_or(false); // Default to false as it might be unstable
 
             kwargs.set_item("use_fp16", use_fp16)?;
             kwargs.set_item("use_torch_compile", use_torch_compile)?;
             kwargs.set_item("use_accel", use_accel)?;
+            kwargs.set_item("use_deepspeed", use_deepspeed)?;
 
-            println!("Model config: use_fp16={}, use_torch_compile={}, use_accel={}", 
-                     use_fp16, use_torch_compile, use_accel);
+            println!("Model config: use_fp16={}, use_torch_compile={}, use_accel={}, use_deepspeed={}", 
+                     use_fp16, use_torch_compile, use_accel, use_deepspeed);
 
             let model = cls.call((), Some(&kwargs))?;
             println!("Model loaded successfully!");
@@ -124,7 +128,9 @@ impl TtsModel {
             let io = py.import("io")?;
             let buffer = io.call_method0("BytesIO")?;
 
-            sf.call_method1("write", (&buffer, audio_numpy, sr, "WAV"))?;
+            let sf_kwargs = PyDict::new(py);
+            sf_kwargs.set_item("format", "WAV")?;
+            sf.call_method("write", (&buffer, audio_numpy, sr), Some(&sf_kwargs))?;
             let bytes = buffer.call_method0("getvalue")?.extract::<Vec<u8>>()?;
             let encode_duration = encode_start.elapsed();
             
