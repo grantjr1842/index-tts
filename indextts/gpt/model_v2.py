@@ -468,35 +468,37 @@ class UnifiedVoice(nn.Module):
             # Check if flash attention is available
             try:
                 import flash_attn
+                from indextts.accel import GPT2AccelModel, AccelInferenceEngine
+
+                # Create accel model
+                accel_gpt = GPT2AccelModel(gpt_config)
+                accel_gpt.load_state_dict(self.gpt.state_dict(), strict=False)
+
+                if half:
+                    accel_gpt = accel_gpt.half().cuda()
+                else:
+                    accel_gpt = accel_gpt.cuda()
+                accel_gpt.eval()
+
+                lm_head_with_norm = nn.Sequential(self.final_norm, self.mel_head)
+                self.accel_engine = AccelInferenceEngine(
+                    model=accel_gpt,
+                    lm_head=lm_head_with_norm,
+                    num_layers=self.layers,
+                    num_heads=self.heads,
+                    head_dim=self.model_dim // self.heads,
+                    block_size=256,
+                    # Reduce to save memory (16*256 = 4096 tokens capacity)
+                    num_blocks=16,
+                    use_cuda_graph=True,
+                )
+                print("acceleration engine initialized")
             except ImportError:
-                raise ImportError(
-                    "flash_attn is required for acceleration but not installed. Please install from https://github.com/Dao-AILab/flash-attention/releases/")
-
-            from indextts.accel import GPT2AccelModel, AccelInferenceEngine
-
-            # Create accel model
-            accel_gpt = GPT2AccelModel(gpt_config)
-            accel_gpt.load_state_dict(self.gpt.state_dict(), strict=False)
-
-            if half:
-                accel_gpt = accel_gpt.half().cuda()
-            else:
-                accel_gpt = accel_gpt.cuda()
-            accel_gpt.eval()
-
-            lm_head_with_norm = nn.Sequential(self.final_norm, self.mel_head)
-            self.accel_engine = AccelInferenceEngine(
-                model=accel_gpt,
-                lm_head=lm_head_with_norm,
-                num_layers=self.layers,
-                num_heads=self.heads,
-                head_dim=self.model_dim // self.heads,
-                block_size=256,
-                # Reduce to save memory (16*256 = 4096 tokens capacity)
-                num_blocks=16,
-                use_cuda_graph=True,
-            )
-            print("acceleration engine initialized")
+                 print("flash_attn not found. Disabling acceleration.")
+                 self.use_accel = False
+            except Exception as e:
+                print(f"Failed to initialize acceleration: {e}. Disabling acceleration.")
+                self.use_accel = False
         self.inference_model = GPT2InferenceModel(
             gpt_config,
             self.gpt,
@@ -506,20 +508,19 @@ class UnifiedVoice(nn.Module):
             self.mel_head,
             kv_cache=kv_cache,
         )
-        if use_deepspeed and half and torch.cuda.is_available():
-            import deepspeed
-            self.ds_engine = deepspeed.init_inference(model=self.inference_model,
-                                                      mp_size=1,
-                                                      replace_with_kernel_inject=True,
-                                                      dtype=torch.float16)
-            self.inference_model = self.ds_engine.module.eval()
-        elif use_deepspeed and torch.cuda.is_available():
-            import deepspeed
-            self.ds_engine = deepspeed.init_inference(model=self.inference_model,
-                                                      mp_size=1,
-                                                      replace_with_kernel_inject=True,
-                                                      dtype=torch.float32)
-            self.inference_model = self.ds_engine.module.eval()
+        if use_deepspeed and torch.cuda.is_available():
+            try:
+                import deepspeed
+                dtype = torch.float16 if half else torch.float32
+                self.ds_engine = deepspeed.init_inference(model=self.inference_model,
+                                                          mp_size=1,
+                                                          replace_with_kernel_inject=True,
+                                                          dtype=dtype)
+                self.inference_model = self.ds_engine.module.eval()
+                print(f"DeepSpeed inference initialized (dtype={dtype})")
+            except Exception as e:
+                print(f"DeepSpeed initialization failed: {e}. Falling back to standard model.")
+                self.inference_model = self.inference_model.eval()
         else:
             self.inference_model = self.inference_model.eval()
 

@@ -72,6 +72,9 @@ webui = [
 deepspeed = [
   "deepspeed==0.17.1",
 ]
+flash-attn = [
+  "flash-attn>=2.5.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/index-tts/index-tts"
@@ -93,7 +96,7 @@ build-backend = "hatchling.build"
 # and finds our CUDA-enabled version of PyTorch, which DeepSpeed *needs* during
 # its compilation to determine what GPU support to compile for itself. It also
 # saves time, since it won't waste time downloading a generic PyTorch version.
-no-build-isolation-package = ["deepspeed"]
+no-build-isolation-package = ["deepspeed", "flash-attn"]
 
 [tool.uv.sources]
 # Install PyTorch with CUDA support on Linux/Windows (CUDA doesn't exist for Mac).
