@@ -299,6 +299,49 @@ Example of running a script via `uv`:
 PYTHONPATH="$PYTHONPATH:." uv run indextts/infer_v2.py
 ```
 
+### ⚡ High Performance TARS Server
+
+For production environments or high-throughput usage, we provide a high-performance Rust-based server (`server/`). This server integrates directly with the Python inference engine but handles HTTP requests and streaming with Rust's efficient `axum` framework.
+
+#### Running the Server
+
+```bash
+# Set up environment variables for the Python path (required for linking)
+export UV_PYTHON_DIR="$HOME/.local/share/uv/python/cpython-3.10.19-linux-x86_64-gnu" # Example
+export LD_LIBRARY_PATH="$UV_PYTHON_DIR/lib:$LD_LIBRARY_PATH"
+export PYTHONHOME="$UV_PYTHON_DIR"
+export PYTHONPATH="$(pwd)/.venv/lib/python3.10/site-packages"
+
+# Build and run
+cd server
+PYO3_PYTHON=../.venv/bin/python cargo build --release
+cd ..
+./server/target/release/server
+```
+
+#### Optimization Flags & Environment Variables
+
+The server supports several environment variables to tune performance:
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `TARS_DEVICE` | `cuda:0` | GPU device to use. |
+| `TARS_FP16` | `1` (True) | Enable FP16 half-precision inference (faster, less VRAM). |
+| `TARS_TORCH_COMPILE` | `1` (True) | Enable `torch.compile` for graph optimization (10-30% speedup). |
+| `TARS_ACCEL` | `1` (True) | Enable accelerated GPT2 inference. |
+| `TARS_WARMUP` | `1` (True) | Perform a dummy inference on startup to pre-cache embeddings and compilation. |
+
+#### ⚠️ GPU Memory Requirements
+
+IndexTTS2 is a large model.
+- **IndexTTS2 VRAM Usage:** ~4GB (FP16) to ~6GB+ (FP32).
+- **Concurrent Usage:** Running IndexTTS2 alongside other models (like `moshi-server` for STT) on a single 8GB GPU is **NOT RECOMMENDED**. It will likely lead to Out-Of-Memory (OOM) errors or severe performance degradation due to swapping.
+- **Recommendation:**
+    - Use a GPU with **16GB+ VRAM** for concurrent pipelines.
+    - If using an 8GB card, ensure **exclusive GPU access** for IndexTTS2 by stopping other GPU processes.
+
+---
+
 Here are several examples of how to use IndexTTS2 in your own scripts:
 
 1. Synthesize new speech with a single reference audio file (voice cloning):
