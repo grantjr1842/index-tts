@@ -355,7 +355,9 @@ class UnifiedWorkerManager:
                        self.setup.manifest_buffer_size))
         
         try:
+            print("[init] Initializing IndexTTS2 model for threaded workers...")
             self.shared_tts = _create_tts(self.setup.worker_cfg)
+            print("[init] IndexTTS2 initialized successfully.")
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to initialize IndexTTS2 for threaded workers: {exc}")
@@ -468,6 +470,19 @@ def _validate_worker_config(cfg: WorkerConfig) -> None:
             raise ValueError(f"Invalid device: {cfg.device}")
 
 
+def _count_samples(jsonl_path: Path, max_samples: Optional[int]) -> int:
+    """Count lines in JSONL file, respecting max_samples."""
+    count = 0
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for _ in f:
+            count += 1
+            if max_samples is not None and count >= max_samples:
+                return max_samples
+    if max_samples is not None:
+        return min(count, max_samples)
+    return count
+
+
 # ============================================================================
 # Common Pipeline Execution Logic (Phase 2-3 Refactoring)
 # ============================================================================
@@ -512,6 +527,9 @@ class CommonPipelineLogic:
             _common_flush_manifest(self.manifest_buffer, index_f)
 
         def finalize_sample(sample_id: str, index_f: IO[str]) -> None:
+            # Capture previous total duration before it's updated
+            prev_total_duration = self.total_duration
+            
             result = _common_finalize_sample(
                 sample_id=sample_id,
                 outstanding=self.outstanding,
@@ -526,8 +544,10 @@ class CommonPipelineLogic:
                 self.total_samples, self.total_duration = result
                 # Update progress tracking
                 self.samples_completed += 1
-                # Get duration from the result or calculate from total
-                duration = self.total_duration_ref[0] - (self.total_duration if self.total_samples > 1 else 0)
+                
+                # Calculate duration of this specific sample
+                duration = self.total_duration - prev_total_duration
+                
                 # Print progress with the new tracking
                 self.print_progress(sample_id, duration)
 
@@ -588,6 +608,7 @@ class CommonPipelineLogic:
             f"[Progress] {self.samples_completed}/{self.samples_total} complete ({progress_pct}%) | "
             f"Elapsed: {elapsed_min}m{elapsed_sec}s | ETA: {eta_min}m{eta_sec}s"
         )
+        sys.stdout.flush()
     
     def get_final_stats(self) -> tuple[int, float]:
         """Get final processing statistics."""
@@ -683,6 +704,9 @@ def _run_synthesis_task(
                 })
             
             infer_fn: InferFn = cast(InferFn, tts.infer)
+            
+            print(f">> starting inference: {task.sample_id} ({task.role})...")
+            
             inference = infer_fn(
                 spk_audio_prompt=task.spk_audio_prompt,
                 text=task.text,
@@ -850,6 +874,10 @@ def _build_dataset_parallel(
         
         # Create common pipeline logic
         pipeline_logic = CommonPipelineLogic(pipeline_config, worker_setup, manager)
+        
+        # Initialize total samples count for progress tracking
+        pipeline_logic.samples_total = _count_samples(input_jsonl, max_samples)
+        
         flush_manifest, finalize_sample, enqueue_task = pipeline_logic.create_common_functions()
         
         # Open index file for writing
@@ -865,7 +893,7 @@ def _build_dataset_parallel(
                         for line_idx, line in enumerate(f_in):
                             if manager.stop_event.is_set():
                                 break
-                            if max_samples is not None and pipeline_logic.samples_planned >= max_samples:
+                            if max_samples is not None and line_idx >= max_samples:
                                 break
                             
                             data = json.loads(line.strip())
@@ -1022,6 +1050,10 @@ def _build_dataset_parallel_threaded(
         
         # Create common pipeline logic
         pipeline_logic = CommonPipelineLogic(pipeline_config, worker_setup, manager)
+        
+        # Initialize total samples count for progress tracking
+        pipeline_logic.samples_total = _count_samples(input_jsonl, max_samples)
+        
         flush_manifest, finalize_sample, enqueue_task = pipeline_logic.create_common_functions()
         
         # Open index file for writing
@@ -1037,7 +1069,7 @@ def _build_dataset_parallel_threaded(
                         for line_idx, line in enumerate(f_in):
                             if manager.stop_event.is_set():
                                 break
-                            if max_samples is not None and pipeline_logic.samples_planned >= max_samples:
+                            if max_samples is not None and line_idx >= max_samples:
                                 break
                             
                             data = json.loads(line.strip())
