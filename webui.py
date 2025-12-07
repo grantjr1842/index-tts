@@ -2,6 +2,7 @@ from tools.i18n.i18n import I18nAuto
 from indextts.infer_v2 import IndexTTS2
 from indextts.constants import LANGUAGES, EMO_CHOICES_KEYS, MODE, MAX_LENGTH_TO_USE_SPEED
 from indextts.types import IndexTTS2Client, InferFn, NormalizeEmoVecFn
+from indextts.logging import setup_logging, get_logger
 import gradio.components as grc
 import gradio as gr
 import argparse
@@ -46,8 +47,12 @@ parser.add_argument("--gui_seg_tokens", type=int, default=120,
                     help="GUI: Max tokens per generation segment")
 cmd_args = parser.parse_args()
 
+# Setup logging
+logger = setup_logging(log_level="DEBUG" if cmd_args.verbose else "INFO")
+
+
 if not os.path.exists(cmd_args.model_dir):
-    print(
+    logger.error(
         f"Model directory {cmd_args.model_dir} does not exist. Please download the model first.")
     sys.exit(1)
 
@@ -60,7 +65,7 @@ for file in [
 ]:
     file_path = os.path.join(cmd_args.model_dir, file)
     if not os.path.exists(file_path):
-        print(f"Required file {file_path} does not exist. Please download it.")
+        logger.error(f"Required file {file_path} does not exist. Please download it.")
         sys.exit(1)
 
 
@@ -366,7 +371,7 @@ with gr.Blocks(title="IndexTTS Demo") as demo:
                                    )
 
     def on_example_click(example: Sequence[Any]) -> GradioUpdateTuple:
-        print(f"Example clicked: ({len(example)} values) = {example!r}")
+        logger.info(f"Example clicked: ({len(example)} values) = {example!r}")
         return (
             gr.update(value=example[0]),
             gr.update(value=example[1]),

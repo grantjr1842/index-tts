@@ -1,4 +1,5 @@
 import os
+from indextts.logging import get_logger
 from subprocess import CalledProcessError
 
 os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
@@ -39,6 +40,8 @@ from transformers import SeamlessM4TFeatureExtractor
 import random
 import torch.nn.functional as F
 
+
+logger = get_logger()
 
 @dataclass
 class InferenceResult:
@@ -86,7 +89,8 @@ class IndexTTS2:
             self.device = "cpu"
             self.use_fp16 = False
             self.use_cuda_kernel = False
-            print(">> Be patient, it may take a while to run in CPU mode.")
+            self.use_cuda_kernel = False
+            logger.info(">> Be patient, it may take a while to run in CPU mode.")
 
         self.cfg = OmegaConf.load(cfg_path)
         self.model_dir = model_dir
@@ -105,14 +109,14 @@ class IndexTTS2:
             self.gpt.eval().half()
         else:
             self.gpt.eval()
-        print(">> GPT weights restored from:", self.gpt_path)
+        logger.info(f">> GPT weights restored from: {self.gpt_path}")
 
         if use_deepspeed:
             try:
                 import deepspeed
             except (ImportError, OSError, CalledProcessError) as e:
                 use_deepspeed = False
-                print(f">> Failed to load DeepSpeed. Falling back to normal inference. Error: {e}")
+                logger.warning(f">> Failed to load DeepSpeed. Falling back to normal inference. Error: {e}")
 
         self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16)
 
@@ -121,10 +125,10 @@ class IndexTTS2:
             try:
                 from indextts.s2mel.modules.bigvgan.alias_free_activation.cuda import activation1d
 
-                print(">> Preload custom CUDA kernel for BigVGAN", activation1d.anti_alias_activation_cuda)
+                logger.info(f">> Preload custom CUDA kernel for BigVGAN {activation1d.anti_alias_activation_cuda}")
             except Exception as e:
-                print(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
-                print(f"{e!r}")
+                logger.warning(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
+                logger.warning(f"{e!r}")
                 self.use_cuda_kernel = False
 
         self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
@@ -140,7 +144,7 @@ class IndexTTS2:
         safetensors.torch.load_model(semantic_codec, semantic_code_ckpt)
         self.semantic_codec = semantic_codec.to(self.device)
         self.semantic_codec.eval()
-        print('>> semantic_codec weights restored from: {}'.format(semantic_code_ckpt))
+        logger.info('>> semantic_codec weights restored from: {}'.format(semantic_code_ckpt))
 
         s2mel_path = os.path.join(self.model_dir, self.cfg.s2mel_checkpoint)
         s2mel = MyModel(self.cfg.s2mel, use_gpt_latent=True)
@@ -157,12 +161,12 @@ class IndexTTS2:
         
         # Enable torch.compile optimization if requested
         if self.use_torch_compile:
-            print(">> Enabling torch.compile optimization")
+            logger.info(">> Enabling torch.compile optimization")
             self.s2mel.enable_torch_compile()
-            print(">> torch.compile optimization enabled successfully")
+            logger.info(">> torch.compile optimization enabled successfully")
         
         self.s2mel.eval()
-        print(">> s2mel weights restored from:", s2mel_path)
+        logger.info(f">> s2mel weights restored from: {s2mel_path}")
 
         # load campplus_model
         campplus_ckpt_path = hf_hub_download(
@@ -172,21 +176,21 @@ class IndexTTS2:
         campplus_model.load_state_dict(torch.load(campplus_ckpt_path, map_location="cpu"))
         self.campplus_model = campplus_model.to(self.device)
         self.campplus_model.eval()
-        print(">> campplus_model weights restored from:", campplus_ckpt_path)
+        logger.info(f">> campplus_model weights restored from: {campplus_ckpt_path}")
 
         bigvgan_name = self.cfg.vocoder.name
         self.bigvgan = bigvgan.BigVGAN.from_pretrained(bigvgan_name, use_cuda_kernel=self.use_cuda_kernel)
         self.bigvgan = self.bigvgan.to(self.device)
         self.bigvgan.remove_weight_norm()
         self.bigvgan.eval()
-        print(">> bigvgan weights restored from:", bigvgan_name)
+        logger.info(f">> bigvgan weights restored from: {bigvgan_name}")
 
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
         self.normalizer = TextNormalizer()
         self.normalizer.load()
-        print(">> TextNormalizer loaded")
+        logger.info(">> TextNormalizer loaded")
         self.tokenizer = TextTokenizer(self.bpe_path, self.normalizer)
-        print(">> bpe model loaded from:", self.bpe_path)
+        logger.info(f">> bpe model loaded from: {self.bpe_path}")
 
         emo_matrix = torch.load(os.path.join(self.model_dir, self.cfg.emo_matrix))
         self.emo_matrix = emo_matrix.to(self.device)
@@ -342,7 +346,7 @@ class IndexTTS2:
 
         if audio.shape[1] > max_audio_samples:
             if verbose:
-                print(f"Audio too long ({audio.shape[1]} samples), truncating to {max_audio_samples} samples")
+                logger.debug(f"Audio too long ({audio.shape[1]} samples), truncating to {max_audio_samples} samples")
             audio = audio[:, :max_audio_samples]
         return audio, sr
     
@@ -399,10 +403,10 @@ class IndexTTS2:
               return_audio=False, return_numpy=False, **generation_kwargs):
         if stream_return and return_audio:
             raise ValueError("return_audio cannot be combined with stream_return mode.")
-        print(">> starting inference...")
+        logger.debug(">> starting inference...")
         self._set_gr_progress(0, "starting inference...")
         if verbose:
-            print(f"origin text:{text}, spk_audio_prompt:{spk_audio_prompt}, "
+            logger.debug(f"origin text:{text}, spk_audio_prompt:{spk_audio_prompt}, "
                   f"emo_audio_prompt:{emo_audio_prompt}, emo_alpha:{emo_alpha}, "
                   f"emo_vector:{emo_vector}, use_emo_text:{use_emo_text}, "
                   f"emo_text:{emo_text}")
@@ -418,7 +422,7 @@ class IndexTTS2:
             if emo_text is None:
                 emo_text = text  # use main text prompt
             emo_dict = self.qwen_emo.inference(emo_text)
-            print(f"detected emotion vectors from text: {emo_dict}")
+            logger.info(f"detected emotion vectors from text: {emo_dict}")
             # convert ordered dict to list of vectors; the order is VERY important!
             emo_vector = list(emo_dict.values())
 
@@ -430,7 +434,7 @@ class IndexTTS2:
             if emo_vector_scale != 1.0:
                 # scale each vector and truncate to 4 decimals (for nicer printing)
                 emo_vector = [int(x * emo_vector_scale * 10000) / 10000 for x in emo_vector]
-                print(f"scaled emotion vectors to {emo_vector_scale}x: {emo_vector}")
+                logger.info(f"scaled emotion vectors to {emo_vector_scale}x: {emo_vector}")
 
         if emo_audio_prompt is None:
             # we are not using any external "emotion reference voice"; use
@@ -521,15 +525,15 @@ class IndexTTS2:
 
         text_token_ids = self.tokenizer.convert_tokens_to_ids(text_tokens_list)
         if self.tokenizer.unk_token_id in text_token_ids:
-            print(f"  >> Warning: input text contains {text_token_ids.count(self.tokenizer.unk_token_id)} unknown tokens (id={self.tokenizer.unk_token_id}):")
-            print( "     Tokens which can't be encoded: ", [t for t, id in zip(text_tokens_list, text_token_ids) if id == self.tokenizer.unk_token_id])
-            print(f"     Consider updating the BPE model or modifying the text to avoid unknown tokens.")
+            logger.warning(f"  >> Warning: input text contains {text_token_ids.count(self.tokenizer.unk_token_id)} unknown tokens (id={self.tokenizer.unk_token_id}):")
+            logger.warning(f"     Tokens which can't be encoded: {[t for t, id in zip(text_tokens_list, text_token_ids) if id == self.tokenizer.unk_token_id]}")
+            logger.warning(f"     Consider updating the BPE model or modifying the text to avoid unknown tokens.")
                   
         if verbose:
-            print("text_tokens_list:", text_tokens_list)
-            print("segments count:", segments_count)
-            print("max_text_tokens_per_segment:", max_text_tokens_per_segment)
-            print(*segments, sep="\n")
+            logger.debug(f"text_tokens_list: {text_tokens_list}")
+            logger.debug(f"segments count: {segments_count}")
+            logger.debug(f"max_text_tokens_per_segment: {max_text_tokens_per_segment}")
+            logger.debug("\n".join(segments))
         do_sample = generation_kwargs.pop("do_sample", True)
         top_p = generation_kwargs.pop("top_p", 0.8)
         top_k = generation_kwargs.pop("top_k", 30)
@@ -555,11 +559,11 @@ class IndexTTS2:
             text_tokens = self.tokenizer.convert_tokens_to_ids(sent)
             text_tokens = torch.tensor(text_tokens, dtype=torch.int32, device=self.device).unsqueeze(0)
             if verbose:
-                print(text_tokens)
-                print(f"text_tokens shape: {text_tokens.shape}, text_tokens type: {text_tokens.dtype}")
+                logger.debug(text_tokens)
+                logger.debug(f"text_tokens shape: {text_tokens.shape}, text_tokens type: {text_tokens.dtype}")
                 # debug tokenizer
                 text_token_syms = self.tokenizer.convert_ids_to_tokens(text_tokens[0].tolist())
-                print("text_token_syms is same as segment tokens", text_token_syms == sent)
+                logger.debug(f"text_token_syms is same as segment tokens {text_token_syms == sent}")
 
             m_start_time = time.perf_counter()
             with torch.no_grad():
@@ -625,9 +629,9 @@ class IndexTTS2:
                 code_lens = torch.LongTensor(code_lens)
                 code_lens = code_lens.to(self.device)
                 if verbose:
-                    print(codes, type(codes))
-                    print(f"fix codes shape: {codes.shape}, codes type: {codes.dtype}")
-                    print(f"code len: {code_lens}")
+                    logger.debug(f"{codes} {type(codes)}")
+                    logger.debug(f"fix codes shape: {codes.shape}, codes type: {codes.dtype}")
+                    logger.debug(f"code len: {code_lens}")
 
                 m_start_time = time.perf_counter()
                 use_speed = torch.zeros(spk_cond_emb.size(0)).to(spk_cond_emb.device).long()
@@ -672,13 +676,14 @@ class IndexTTS2:
 
                     m_start_time = time.perf_counter()
                     wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
-                    print(wav.shape)
+                    if verbose:
+                        logger.debug(wav.shape)
                     bigvgan_time += time.perf_counter() - m_start_time
                     wav = wav.squeeze(1)
 
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
                 if verbose:
-                    print(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
+                    logger.debug(f"wav shape: {wav.shape} min: {wav.min()} max: {wav.max()}")
                 # wavs.append(wav[:, :-512])
                 wavs.append(wav.cpu())  # to cpu before saving
                 if stream_return:
@@ -694,13 +699,13 @@ class IndexTTS2:
         wav = wav.cpu()
         mono_audio = wav.squeeze(0).contiguous()
         wav_length = mono_audio.shape[-1] / sampling_rate
-        print(f">> gpt_gen_time: {gpt_gen_time:.2f} seconds")
-        print(f">> gpt_forward_time: {gpt_forward_time:.2f} seconds")
-        print(f">> s2mel_time: {s2mel_time:.2f} seconds")
-        print(f">> bigvgan_time: {bigvgan_time:.2f} seconds")
-        print(f">> Total inference time: {end_time - start_time:.2f} seconds")
-        print(f">> Generated audio length: {wav_length:.2f} seconds")
-        print(f">> RTF: {(end_time - start_time) / wav_length:.4f}")
+        logger.info(f">> gpt_gen_time: {gpt_gen_time:.2f} seconds")
+        logger.info(f">> gpt_forward_time: {gpt_forward_time:.2f} seconds")
+        logger.info(f">> s2mel_time: {s2mel_time:.2f} seconds")
+        logger.info(f">> bigvgan_time: {bigvgan_time:.2f} seconds")
+        logger.info(f">> Total inference time: {end_time - start_time:.2f} seconds")
+        logger.info(f">> Generated audio length: {wav_length:.2f} seconds")
+        logger.info(f">> RTF: {(end_time - start_time) / wav_length:.4f}")
         total_time = end_time - start_time
         rtf = (total_time / wav_length) if wav_length else None
 
@@ -708,11 +713,11 @@ class IndexTTS2:
         if output_path and not return_audio:
             if os.path.isfile(output_path):
                 os.remove(output_path)
-                print(">> remove old wav file:", output_path)
+                logger.info(f">> remove old wav file: {output_path}")
             if os.path.dirname(output_path) != "":
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
             torchaudio.save(output_path, mono_audio.unsqueeze(0).type(torch.int16), sampling_rate)
-            print(">> wav file saved to:", output_path)
+            logger.info(f">> wav file saved to: {output_path}")
             saved_path = output_path
             if stream_return:
                 return None

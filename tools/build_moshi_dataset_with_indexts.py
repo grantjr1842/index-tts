@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from __future__ import annotations
+from indextts.logging import setup_logging, get_logger
 
 import argparse
 import contextlib
@@ -12,6 +13,8 @@ import queue
 import sys
 import threading
 import time
+
+logger = get_logger()
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -268,7 +271,8 @@ def _common_finalize_sample(
     
     total_samples_ref[0] += 1
     total_duration_ref[0] += duration_sec
-    print(
+    total_duration_ref[0] += duration_sec
+    logger.info(
         f"[{total_samples_ref[0]}] wrote {stereo_rel_path} (duration={duration_sec:.2f}s, "
         f"cumulative={total_duration_ref[0]:.2f}s)"
     )
@@ -355,9 +359,9 @@ class UnifiedWorkerManager:
                        self.setup.manifest_buffer_size))
         
         try:
-            print("[init] Initializing IndexTTS2 model for threaded workers...")
+            logger.info("[init] Initializing IndexTTS2 model for threaded workers...")
             self.shared_tts = _create_tts(self.setup.worker_cfg)
-            print("[init] IndexTTS2 initialized successfully.")
+            logger.info("[init] IndexTTS2 initialized successfully.")
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to initialize IndexTTS2 for threaded workers: {exc}")
@@ -618,7 +622,7 @@ class CommonPipelineLogic:
             raise RuntimeError(
                 f"Pipeline finished with incomplete samples: {missing_ids}"
             )
-        print(
+        logger.info(
             f"\n[Complete] Pipeline finished in {elapsed:.2f}s — "
             f"samples: {self.total_samples}, total duration: {self.total_duration:.2f}s"
         )
@@ -705,7 +709,7 @@ def _run_synthesis_task(
             
             infer_fn: InferFn = cast(InferFn, tts.infer)
             
-            print(f">> starting inference: {task.sample_id} ({task.role})...")
+            logger.debug(f">> starting inference: {task.sample_id} ({task.role})...")
             
             inference = infer_fn(
                 spk_audio_prompt=task.spk_audio_prompt,
@@ -767,7 +771,8 @@ def _synthesis_worker(
             res = _run_synthesis_task(
                 task=task, cfg=cfg, tts=tts, inference_lock=None, gpu_semaphore=None
             )
-            result_queue.put(("ok", res))
+            task_id = f"{task.sample_id}_{task.role}"
+            result_queue.put(("result", (task_id, res)))
         except Exception as exc:  # pragma: no cover - surfaced to main process
             result_queue.put((
                 "error",
@@ -949,7 +954,7 @@ def _build_dataset_parallel(
                             if len(pipeline_logic.outstanding[sample_id]) == 2:
                                 finalize_sample(sample_id, index_f)
                     elif msg_type == "error":
-                        print(f"Worker error: {msg_data}", file=sys.stderr)
+                        logger.error(f"Worker error: {msg_data}")
                         manager.stop_event.set()
                         raise RuntimeError(f"Worker error: {msg_data}")
                     elif msg_type == "worker_exit":
@@ -965,7 +970,7 @@ def _build_dataset_parallel(
             # CRITICAL FIX: Drain any remaining results from queue after all workers exit
             # Workers may have put results before their exit messages, so we need to process
             # any remaining results to prevent "incomplete samples" errors
-            print(f"[Cleanup] All workers exited, draining remaining results from queue...")
+            logger.info(f"[Cleanup] All workers exited, draining remaining results from queue...")
             drained_count = 0
             while True:
                 try:
@@ -983,7 +988,7 @@ def _build_dataset_parallel(
                     break
             
             if drained_count > 0:
-                print(f"[Cleanup] Processed {drained_count} remaining results from queue")
+                logger.info(f"[Cleanup] Processed {drained_count} remaining results from queue")
             
             flush_manifest(index_f)
         
@@ -1137,7 +1142,7 @@ def _build_dataset_parallel_threaded(
                             if len(pipeline_logic.outstanding[sample_id]) == 2:
                                 finalize_sample(sample_id, index_f)
                     elif msg_type == "error":
-                        print(f"Worker error: {msg_data}", file=sys.stderr)
+                        logger.error(f"Worker error: {msg_data}")
                         manager.stop_event.set()
                         raise RuntimeError(f"Worker error: {msg_data}")
                     elif msg_type == "worker_exit":
@@ -1151,7 +1156,7 @@ def _build_dataset_parallel_threaded(
                     continue
             
             # CRITICAL FIX: Drain any remaining results from queue after all workers exit
-            print(f"[Cleanup] All workers exited, draining remaining results from queue...")
+            logger.info(f"[Cleanup] All workers exited, draining remaining results from queue...")
             drained_count = 0
             while True:
                 try:
@@ -1169,7 +1174,7 @@ def _build_dataset_parallel_threaded(
                     break
             
             if drained_count > 0:
-                print(f"[Cleanup] Processed {drained_count} remaining results from queue")
+                logger.info(f"[Cleanup] Processed {drained_count} remaining results from queue")
             
             flush_manifest(index_f)
         
@@ -1367,7 +1372,9 @@ def _build_dataset_legacy(
 
             total_samples += 1
             total_duration += duration_sec
-            print(
+            total_samples += 1
+            total_duration += duration_sec
+            logger.info(
                 f"[{total_samples}] wrote {stereo_rel_path} (duration={duration_sec:.2f}s, "
                 f"cumulative={total_duration:.2f}s)"
             )
@@ -1424,7 +1431,7 @@ def build_dataset(
         import numpy as np
         
         global_seed = seed if seed is not None else 42
-        print(f"[deterministic] Setting global seed to {global_seed}")
+        logger.info(f"[deterministic] Setting global seed to {global_seed}")
         
         random.seed(global_seed)
         np.random.seed(global_seed)
@@ -1433,7 +1440,7 @@ def build_dataset(
             torch.cuda.manual_seed_all(global_seed)
         
         if deterministic:
-            print("[deterministic] Enabling torch deterministic algorithms")
+            logger.info("[deterministic] Enabling torch deterministic algorithms")
             torch.use_deterministic_algorithms(True)
             if torch.cuda.is_available():
                 torch.backends.cudnn.deterministic = True
@@ -1443,7 +1450,7 @@ def build_dataset(
                 torch.backends.cudnn.allow_tf32 = False
 
     if mock_inference:
-        print(
+        logger.info(
             "[mock] Using synthetic audio for benchmarking; IndexTTS2 will not be loaded.")
 
     if user_spk_prompt and not Path(user_spk_prompt).expanduser().exists():
@@ -1475,7 +1482,7 @@ def build_dataset(
     
     # Force single GPU concurrency for deterministic parity testing
     if deterministic and max_gpu_concurrency > 1:
-        print(f"[deterministic] Forcing max_gpu_concurrency=1 (was {max_gpu_concurrency}) for parity testing")
+        logger.warning(f"[deterministic] Forcing max_gpu_concurrency=1 (was {max_gpu_concurrency}) for parity testing")
         max_gpu_concurrency = 1
     
     backend_choice = (worker_backend or "auto").lower()
@@ -1505,7 +1512,7 @@ def build_dataset(
             effective_planner_buffer != planner_buffer
             or effective_manifest_buffer != manifest_buffer_size
         ):
-            print(
+            logger.info(
                 f"[threaded] tuning buffers for shared-GPU mode "
                 f"(planner={effective_planner_buffer}, manifest={effective_manifest_buffer})"
             )
@@ -1513,7 +1520,7 @@ def build_dataset(
     use_parallel = not legacy_io and worker_count and worker_count > 0
     if use_parallel:
         backend_label = "thread" if use_thread_backend else "process"
-        print(
+        logger.info(
             f"Using {backend_label} backend with worker-count={worker_count} on device={device or 'default'}"
         )
         if use_thread_backend:
@@ -1561,13 +1568,14 @@ def build_dataset(
         )
 
     avg_dur = (total_duration / total_samples) if total_samples else 0.0
-    print(
-        f"\nDone. JSONL index written to: {index_path}\n"
+    avg_dur = (total_duration / total_samples) if total_samples else 0.0
+    logger.info(
+        f"Done. JSONL index written to: {index_path} "
         f"Summary -> samples: {total_samples}, total duration: {total_duration:.2f}s, avg: {avg_dur:.2f}s"
     )
-    print(
-        "You can now run (from moshi-finetune repo):\n"
-        f"  python annotate.py {index_path}"
+    logger.info(
+        "You can now run (from moshi-finetune repo): "
+        f"python annotate.py {index_path}"
     )
 
 
@@ -1728,6 +1736,8 @@ def main():
     )
 
     args = parser.parse_args()
+    
+    setup_logging()
 
     build_dataset(
         input_jsonl=args.input_jsonl,
