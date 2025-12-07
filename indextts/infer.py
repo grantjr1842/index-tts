@@ -87,7 +87,10 @@ class IndexTTS:
         # else:
         #     self.dvae.eval()
         # print(">> vqvae weights restored from:", self.dvae_path)
-        self.gpt = UnifiedVoice(**self.cfg.gpt)
+        gpt_config = OmegaConf.to_container(self.cfg.gpt, resolve=True)
+        if "emo_condition_module" in gpt_config:
+            del gpt_config["emo_condition_module"]
+        self.gpt = UnifiedVoice(**gpt_config)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
         load_checkpoint(self.gpt, self.gpt_path)
         self.gpt = self.gpt.to(self.device)
