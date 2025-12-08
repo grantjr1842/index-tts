@@ -1,4 +1,10 @@
+import os
 import functools
+
+# Silencing the TORCH_CUDA_ARCH_LIST warning
+if "TORCH_CUDA_ARCH_LIST" not in os.environ:
+    os.environ["TORCH_CUDA_ARCH_LIST"] = "7.5"
+
 
 import torch
 import torch.nn as nn
