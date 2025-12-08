@@ -77,3 +77,6 @@ pnpm-debug.log*
 # Agent
 .agent/
 !.agent/workflows/
+
+# Torch compile cache
+checkpoints/torch_compile_cache/

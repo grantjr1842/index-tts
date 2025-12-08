@@ -1,6 +1,5 @@
 import io
 import json
-from operator import truediv
 import os
 import hashlib
 import asyncio
@@ -16,6 +15,15 @@ import soundfile as sf
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+
+# Enable torch.compile cache to persist compiled graphs across restarts
+TORCH_COMPILE_CACHE_DIR = os.path.join("checkpoints", "torch_compile_cache")
+os.makedirs(TORCH_COMPILE_CACHE_DIR, exist_ok=True)
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = TORCH_COMPILE_CACHE_DIR
+# Enable FX graph cache for torch.compile
+os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
+# Disable max_autotune_gemm which requires more SMs than available on smaller GPUs
+os.environ["TORCHINDUCTOR_MAX_AUTOTUNE_GEMM"] = "0"
 
 # IndexTTS imports
 from indextts.logging import (
@@ -50,6 +58,7 @@ class Settings:
     use_torch_compile: bool = os.getenv("TARS_TORCH_COMPILE", "1") == "1"
     use_cuda_kernel: Optional[bool] = True
     enable_streaming: bool = os.getenv("TARS_ENABLE_STREAMING", "1") == "1"
+    warmup_on_start: bool = os.getenv("TARS_WARMUP", "1") == "1"
 
     def __init__(self) -> None:
         device = self.device
@@ -84,8 +93,10 @@ async def lifespan(app: FastAPI):
         "Device": settings.device,
         "FP16": settings.use_fp16,
         "Torch Compile": settings.use_torch_compile,
+        "Compile Cache": TORCH_COMPILE_CACHE_DIR if settings.use_torch_compile else "N/A",
         "CUDA Kernel": settings.use_cuda_kernel,
         "Streaming": settings.enable_streaming,
+        "Warmup": settings.warmup_on_start,
         "Max Concurrency": settings.max_concurrency,
         "Reference Audio": os.path.basename(TARS_REFERENCE_AUDIO),
         "Checkpoint Dir": CHECKPOINT_DIR,
@@ -111,6 +122,29 @@ async def lifespan(app: FastAPI):
     executor = ThreadPoolExecutor(max_workers=max(settings.max_concurrency, 1))
     concurrency_sem = asyncio.Semaphore(settings.max_concurrency)
     print_section_footer()
+    
+    # Warmup section - triggers torch.compile and caches the compiled graph
+    if settings.warmup_on_start and settings.use_torch_compile:
+        print()
+        print_section_header("Warmup (torch.compile)", 50)
+        print_section_item("Status", "Running warmup inference...")
+        warmup_start = time.perf_counter()
+        try:
+            # Run a minimal inference to trigger torch.compile
+            _ = tts_model.infer(
+                spk_audio_prompt=TARS_REFERENCE_AUDIO,
+                text="Hi",  # Minimal text for fast warmup
+                output_path=None,
+                return_audio=True,
+                return_numpy=True,
+            )
+            warmup_time = time.perf_counter() - warmup_start
+            print_section_item("Duration", f"{warmup_time:.2f}s")
+            print_section_item("Cache", f"Saved to {TORCH_COMPILE_CACHE_DIR}")
+            print_section_item("Result", f"{COLORS['green']}Success{COLORS['reset']}")
+        except Exception as e:
+            print_section_item("Result", f"{COLORS['red']}Failed: {e}{COLORS['reset']}")
+        print_section_footer(50)
     
     # Server ready section
     print()
