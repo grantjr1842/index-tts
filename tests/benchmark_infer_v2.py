@@ -103,7 +103,13 @@ def benchmark(args):
             )
             gen_time = time.time() - iter_start
             
-            sr, audio = res
+            # res can be an InferenceResult object or a tuple depending on version/config
+            if hasattr(res, 'sampling_rate') and hasattr(res, 'audio'):
+                 sr = res.sampling_rate
+                 audio = res.audio
+            else:
+                 sr, audio = res
+                 
             if audio is None:
                  print(f"Case {i}: No audio returned.")
                  continue
