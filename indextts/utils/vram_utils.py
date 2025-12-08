@@ -25,10 +25,23 @@ def quantize_model_int8(model: torch.nn.Module, dtype=torch.qint8) -> torch.nn.M
     """
     from torch.ao.quantization import quantize_dynamic
     
-    # Move to CPU for quantization
-    was_cuda = next(model.parameters()).is_cuda
-    if was_cuda:
-        model = model.cpu()
+    # Must move entire model to CPU first - quantization only works on CPU
+    # Use .to() to recursively move all submodules, parameters, and buffers
+    model = model.cpu()
+    
+    # Ensure all parameters are on CPU (sanity check)
+    for param in model.parameters():
+        if param.device.type != 'cpu':
+            param.data = param.data.cpu()
+    
+    # Ensure all buffers are on CPU
+    for buffer in model.buffers():
+        if buffer.device.type != 'cpu':
+            buffer.data = buffer.data.cpu()
+    
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     quantized = quantize_dynamic(
         model,

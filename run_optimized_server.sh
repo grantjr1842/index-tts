@@ -37,6 +37,9 @@ export TARS_DEEPSPEED=0
 # Recommended for 8GB GPUs: set to 1
 export TARS_CPU_OFFLOAD=1
 
+# INT8 quantization for semantic model
+export TARS_INT8=1
+
 # Warmup on startup (recommended)
 export TARS_WARMUP=1
 
