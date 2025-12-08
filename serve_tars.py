@@ -8,14 +8,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Any, Dict, Tuple, Iterable
 
-import numpy as np
-import torch
-import uvicorn
-import soundfile as sf
-from fastapi import FastAPI, HTTPException, status
-from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
-
+# === Torch Inductor config (MUST be set before importing torch) ===
 # Enable torch.compile cache to persist compiled graphs across restarts
 TORCH_COMPILE_CACHE_DIR = os.path.join("checkpoints", "torch_compile_cache")
 os.makedirs(TORCH_COMPILE_CACHE_DIR, exist_ok=True)
@@ -24,6 +17,18 @@ os.environ["TORCHINDUCTOR_CACHE_DIR"] = TORCH_COMPILE_CACHE_DIR
 os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
 # Disable max_autotune_gemm which requires more SMs than available on smaller GPUs
 os.environ["TORCHINDUCTOR_MAX_AUTOTUNE_GEMM"] = "0"
+
+import numpy as np
+import torch
+import torch._inductor.config
+import uvicorn
+import soundfile as sf
+from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel
+
+# Also set via config API for completeness (env var should suffice but this ensures it)
+torch._inductor.config.max_autotune_gemm = False
 
 # IndexTTS imports
 from indextts.logging import (

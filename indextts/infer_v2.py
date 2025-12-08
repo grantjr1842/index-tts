@@ -13,8 +13,12 @@ from typing import Optional, Union
 import librosa
 import numpy as np
 import torch
+import torch._inductor.config
 import torchaudio
 from torch.nn.utils.rnn import pad_sequence
+
+# Disable max_autotune_gemm - requires more SMs than available on smaller GPUs
+torch._inductor.config.max_autotune_gemm = False
 
 import warnings
 

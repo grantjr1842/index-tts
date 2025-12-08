@@ -25,6 +25,7 @@ def device_sync(device):
 torch._inductor.config.coordinate_descent_tuning = True
 torch._inductor.config.triton.unique_kernel_names = True
 torch._inductor.config.fx_graph_cache = True # Experimental feature to reduce compilation times, will be on by default in future
+torch._inductor.config.max_autotune_gemm = False  # Disable for GPUs with fewer SMs
 
 default_device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
