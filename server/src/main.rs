@@ -186,7 +186,10 @@ async fn stream_handler(
 
                             let buffer = io.call_method0("BytesIO")?;
 
-                            sf.call_method1("write", (&buffer, wav_numpy, 24000, "WAV"))?;
+                            // Use keyword argument for format when writing to BytesIO
+                            let sf_kwargs = pyo3::types::PyDict::new(py);
+                            sf_kwargs.set_item("format", "WAV")?;
+                            sf.call_method("write", (&buffer, wav_numpy, 22050), Some(&sf_kwargs))?;
                             buffer.call_method0("getvalue")?.extract::<Vec<u8>>()
                         })()?;
 
