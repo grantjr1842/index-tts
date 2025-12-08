@@ -112,7 +112,7 @@ class IndexTTS2:
         self._qwen_emo = None
         self._qwen_emo_path = os.path.join(self.model_dir, self.cfg.qwen_emo_path)
         self._use_cpu_offload = os.environ.get('TARS_CPU_OFFLOAD', '0') == '1'
-        self._use_int8 = os.environ.get('TARS_INT8', '0') == '1'
+        self._use_int8 = os.environ.get('TARS_INT8', '1') == '1'
         if self._use_cpu_offload:
             logger.info(">> CPU offloading enabled for embedding models")
         if self._use_int8:
