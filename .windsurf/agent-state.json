@@ -1,18 +1,9 @@
 {
-    "phase": "merging",
-    "issue_number": 43,
-    "branch": "feat/issue-43-vram-logging",
-    "tasks": [
-        {"description": "Update infer_v2.py initialization to use print_stage() consistently", "done": true},
-        {"description": "Add VRAM tracking during inference", "done": true},
-        {"description": "Update serve_tars.py to use beautified logging", "done": true},
-        {"description": "Add VRAM usage reporting in inference timing logs", "done": true},
-        {"description": "Update offload/reload methods with formatted output", "done": true},
-        {"description": "Test server startup and inference", "done": true},
-        {"description": "Add graceful shutdown handling", "done": true},
-        {"description": "Add grouped sections and request logging", "done": true}
-    ],
-    "current_task_index": 8,
-    "merge_sha": null,
-    "last_updated": "2025-12-08T03:25:00Z"
+    "phase": "idle",
+    "issue_number": null,
+    "branch": null,
+    "tasks": [],
+    "current_task_index": 0,
+    "merge_sha": "699110b369f5d554ba58045c6a64e29a741061c9",
+    "last_updated": "2025-12-08T03:47:00Z"
 }
