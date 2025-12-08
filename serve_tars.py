@@ -2,8 +2,9 @@ import io
 import json
 import os
 import hashlib
-import shutil
 import asyncio
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Any, Dict, Tuple, Iterable
 
@@ -15,13 +16,26 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+# Enable torch.compile cache to persist compiled graphs across restarts
+TORCH_COMPILE_CACHE_DIR = os.path.join("checkpoints", "torch_compile_cache")
+os.makedirs(TORCH_COMPILE_CACHE_DIR, exist_ok=True)
+os.environ["TORCHINDUCTOR_CACHE_DIR"] = TORCH_COMPILE_CACHE_DIR
+# Enable FX graph cache for torch.compile
+os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
+# Disable max_autotune_gemm which requires more SMs than available on smaller GPUs
+os.environ["TORCHINDUCTOR_MAX_AUTOTUNE_GEMM"] = "0"
+
 # IndexTTS imports
-from indextts.logging import setup_logging
-print("Setting up logging...")
+from indextts.logging import (
+    setup_logging, print_stage, print_section_header, print_section_footer,
+    print_section_item, print_config_section, print_request_start,
+    print_request_complete, GracefulShutdown, COLORS
+)
+print_stage("Setting up logging", "progress")
 setup_logging()
-print("Importing IndexTTS2...")
+print_stage("Importing IndexTTS2", "progress")
 from indextts.infer_v2 import IndexTTS2
-print("IndexTTS2 imported.")
+print_stage("IndexTTS2 imported", "complete")
 
 CACHE_DIR = os.path.join("outputs", "cache")
 TARS_REFERENCE_AUDIO = os.path.abspath(
@@ -73,15 +87,32 @@ concurrency_sem: asyncio.Semaphore | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global tts_model, executor, concurrency_sem
-    print("Loading IndexTTS2 model...")
+    
+    # Display configuration section
+    print()
+    print_config_section("TARS Server Configuration", {
+        "Device": settings.device,
+        "FP16": settings.use_fp16,
+        "INT8": settings.use_int8,
+        "Torch Compile": settings.use_torch_compile,
+        "Compile Cache": TORCH_COMPILE_CACHE_DIR if settings.use_torch_compile else "N/A",
+        "CUDA Kernel": settings.use_cuda_kernel,
+        "Streaming": settings.enable_streaming,
+        "Warmup": settings.warmup_on_start,
+        "Max Concurrency": settings.max_concurrency,
+        "Reference Audio": os.path.basename(TARS_REFERENCE_AUDIO),
+        "Checkpoint Dir": CHECKPOINT_DIR,
+        "Cache Dir": CACHE_DIR,
+    })
+    print()
+    
     if not os.path.exists(TARS_REFERENCE_AUDIO):
-        print(f"WARNING: Reference audio not found at {TARS_REFERENCE_AUDIO}")
+        print_stage(f"Reference audio not found at {TARS_REFERENCE_AUDIO}", "failed")
 
     os.makedirs(CACHE_DIR, exist_ok=True)
 
-    print(f"Using device: {settings.device}")
-    print(f"INT8 quantization: {settings.use_int8}")
-
+    # Model loading section
+    print_section_header("Model Loading")
     tts_model = IndexTTS2(
         cfg_path=CONFIG_PATH,
         model_dir=CHECKPOINT_DIR,
@@ -92,9 +123,44 @@ async def lifespan(app: FastAPI):
     )
     executor = ThreadPoolExecutor(max_workers=max(settings.max_concurrency, 1))
     concurrency_sem = asyncio.Semaphore(settings.max_concurrency)
-    print("Model loaded successfully!")
+    print_section_footer()
+    
+    # Warmup section - triggers torch.compile and caches the compiled graph
+    if settings.warmup_on_start and settings.use_torch_compile:
+        print()
+        print_section_header("Warmup (torch.compile)", 50)
+        print_section_item("Status", "Running warmup inference...")
+        warmup_start = time.perf_counter()
+        try:
+            # Run a minimal inference to trigger torch.compile
+            _ = tts_model.infer(
+                spk_audio_prompt=TARS_REFERENCE_AUDIO,
+                text="Hi",  # Minimal text for fast warmup
+                output_path=None,
+                return_audio=True,
+                return_numpy=True,
+            )
+            warmup_time = time.perf_counter() - warmup_start
+            print_section_item("Duration", f"{warmup_time:.2f}s")
+            print_section_item("Cache", f"Saved to {TORCH_COMPILE_CACHE_DIR}")
+            print_section_item("Result", f"{COLORS['green']}Success{COLORS['reset']}")
+        except Exception as e:
+            print_section_item("Result", f"{COLORS['red']}Failed: {e}{COLORS['reset']}")
+        print_section_footer(50)
+    
+    # Server ready section
+    print()
+    print_section_header("Server Ready", 40)
+    print_section_item("Port", "8009")
+    print_section_item("Endpoints", "/tts, /tts/stream, /healthz, /readyz")
+    if torch.cuda.is_available():
+        print_section_item("VRAM", f"{torch.cuda.memory_allocated()/1e9:.2f}GB")
+    print_section_footer(40)
+    print()
+    
     yield
-    print("Shutting down TARS server...")
+    
+    # Shutdown handled by GracefulShutdown or here
     if executor:
         executor.shutdown(wait=True)
 
@@ -138,6 +204,11 @@ def _blocking_infer(request: TTSRequest) -> Tuple[bytes, int, Dict[str, Any]]:
     """
     if tts_model is None:
         raise RuntimeError("Model not loaded")
+    
+    request_id = str(uuid.uuid4())[:8]
+    print_request_start(request_id, request.text)
+    start_time = time.perf_counter()
+    
     cache_payload = {
         "text": request.text,
         "temperature": request.temperature,
@@ -150,7 +221,10 @@ def _blocking_infer(request: TTSRequest) -> Tuple[bytes, int, Dict[str, Any]]:
     cached = _maybe_cached(cache_payload)
     if cached:
         path, data = cached
-        print(f"Cache hit: {path}")
+        # Estimate audio length from file size (16-bit mono @ 22050Hz)
+        audio_length = len(data) / (22050 * 2)
+        duration = time.perf_counter() - start_time
+        print_request_complete(request_id, duration, audio_length, duration / audio_length if audio_length > 0 else 0, cached=True)
         return data, 0, cache_payload
 
     audio_result = tts_model.infer(
@@ -172,6 +246,12 @@ def _blocking_infer(request: TTSRequest) -> Tuple[bytes, int, Dict[str, Any]]:
     sf.write(buffer, audio_data, sample_rate, format="WAV")
     data = buffer.getvalue()
     _save_cache(cache_payload, data)
+    
+    duration = time.perf_counter() - start_time
+    audio_length = result.duration_sec if result.duration_sec else len(audio_data) / sample_rate
+    rtf = result.rtf if result.rtf else (duration / audio_length if audio_length > 0 else 0)
+    print_request_complete(request_id, duration, audio_length, rtf)
+    
     return data, sample_rate, cache_payload
 
 
@@ -263,6 +343,20 @@ async def readyz():
     ready = tts_model is not None and os.path.exists(TARS_REFERENCE_AUDIO)
     return {"ready": ready, "ref_audio": TARS_REFERENCE_AUDIO, "device": settings.device}
 
+def _cleanup():
+    """Cleanup function for graceful shutdown."""
+    global executor
+    if executor:
+        executor.shutdown(wait=False)
+
+
 if __name__ == "__main__":
-    print("Starting Uvicorn...")
-    uvicorn.run(app, host="0.0.0.0", port=8009)
+    print()
+    print_section_header("TARS Voice Server", 50)
+    print_section_item("Version", "2.0")
+    print_section_item("Port", "8009")
+    print_section_footer(50)
+    print()
+    
+    with GracefulShutdown(cleanup=_cleanup):
+        uvicorn.run(app, host="0.0.0.0", port=8009)
