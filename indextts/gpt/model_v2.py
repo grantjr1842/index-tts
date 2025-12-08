@@ -480,31 +480,37 @@ class UnifiedVoice(nn.Module):
                 # Check if flash attention is available
                 try:
                     import flash_attn
-                    from indextts.accel import GPT2AccelModel, AccelInferenceEngine
-
-                    # Create accel model
-                    accel_gpt = GPT2AccelModel(gpt_config)
-                    accel_gpt.load_state_dict(self.gpt.state_dict(), strict=False)
-
-                    if half:
-                        accel_gpt = accel_gpt.half().cuda()
+                    # FlashAttention v1 (Turing compatible) does not support the PagedAttention ops used in Accel
+                    if hasattr(flash_attn, "__version__") and flash_attn.__version__.startswith("1."):
+                         print(f"FlashAttention v{flash_attn.__version__} detected. Custom Accel Engine requires v2 (Ampere+). Falling back to DeepSpeed acceleration.")
+                         self.use_accel = False
                     else:
-                        accel_gpt = accel_gpt.cuda()
-                    accel_gpt.eval()
+                        from indextts.accel import GPT2AccelModel, AccelInferenceEngine
 
-                    lm_head_with_norm = nn.Sequential(self.final_norm, self.mel_head)
-                    self.accel_engine = AccelInferenceEngine(
-                        model=accel_gpt,
-                        lm_head=lm_head_with_norm,
-                        num_layers=self.layers,
-                        num_heads=self.heads,
-                        head_dim=self.model_dim // self.heads,
-                        block_size=256,
-                        # Reduce to save memory (16*256 = 4096 tokens capacity)
-                        num_blocks=16,
-                        use_cuda_graph=True,
-                    )
-                    print("acceleration engine initialized")
+                        # Create accel model
+                        accel_gpt = GPT2AccelModel(gpt_config)
+                        accel_gpt.load_state_dict(self.gpt.state_dict(), strict=False)
+
+
+                        if half:
+                            accel_gpt = accel_gpt.half().cuda()
+                        else:
+                            accel_gpt = accel_gpt.cuda()
+                        accel_gpt.eval()
+
+                        lm_head_with_norm = nn.Sequential(self.final_norm, self.mel_head)
+                        self.accel_engine = AccelInferenceEngine(
+                            model=accel_gpt,
+                            lm_head=lm_head_with_norm,
+                            num_layers=self.layers,
+                            num_heads=self.heads,
+                            head_dim=self.model_dim // self.heads,
+                            block_size=256,
+                            # Reduce to save memory (16*256 = 4096 tokens capacity)
+                            num_blocks=16,
+                            use_cuda_graph=True,
+                        )
+                        print("acceleration engine initialized")
                 except ImportError:
                      print("flash_attn not found. Disabling acceleration.")
                      self.use_accel = False
@@ -525,7 +531,7 @@ class UnifiedVoice(nn.Module):
                 import deepspeed
                 dtype = torch.float16 if half else torch.float32
                 self.ds_engine = deepspeed.init_inference(model=self.inference_model,
-                                                          mp_size=1,
+                                                          tensor_parallel={"tp_size": 1},
                                                           replace_with_kernel_inject=True,
                                                           dtype=dtype)
                 self.inference_model = self.ds_engine.module.eval()

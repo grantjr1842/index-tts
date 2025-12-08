@@ -13,6 +13,9 @@ PYO3_PYTHON=/home/admin-grant-jr/github/index-tts/.venv/bin/python cargo build -
 cd ..
 
 echo "Starting server with optimizations..."
+export TORCH_CUDA_ARCH_LIST="7.5"
+export PATH="$(pwd)/.venv/bin:$PATH"
+export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:128"
 export TARS_DEVICE="cuda:0"
 export TARS_FP16=1
 export TARS_TORCH_COMPILE=1

@@ -1,34 +1,26 @@
 {
     "phase": "implementing",
-    "issue_number": 23,
-    "branch": "feature/inference-speed-optimization",
+    "issue_number": 29,
+    "branch": "feat/issue-29-flash-attn-2070",
     "tasks": [
         {
-            "description": "Update Rust server (tts.rs) to pass use_torch_compile=true and use_accel=true to IndexTTS2",
+            "description": "Research FlashAttention compatibility for Turing (RTX 2070) cards",
             "done": false
         },
         {
-            "description": "Add environment variable support (TARS_TORCH_COMPILE, TARS_ACCEL) for toggling optimizations",
+            "description": "Check current FlashAttention implementation in codebase",
             "done": false
         },
         {
-            "description": "Add server warmup on startup - perform dummy inference to cache speaker embeddings",
+            "description": "Implement compatibility fix or workaround (e.g. FlashAttention-v1 or fallback)",
             "done": false
         },
         {
-            "description": "Add timing/profiling logs to identify bottlenecks",
-            "done": false
-        },
-        {
-            "description": "Document GPU memory requirements and concurrent usage limitations in README",
-            "done": false
-        },
-        {
-            "description": "Test and benchmark inference speed with optimizations enabled",
+            "description": "Verify functionality and performance",
             "done": false
         }
     ],
     "current_task_index": 0,
-    "merge_sha": null,
-    "last_updated": "2025-12-07T18:10:00-05:00"
+    "merge_sha": "10f3bf51bad01b259d86fa38fe4c0895a073d29e",
+    "last_updated": "2025-12-07T19:00:00-05:00"
 }
