@@ -110,17 +110,26 @@ class IndexTTS2:
         self.stop_mel_token = self.cfg.gpt.stop_mel_token
         self.use_accel = use_accel
         self.use_torch_compile = use_torch_compile
-        self.use_cuda_kernel = False  # Force disable to avoid hang (original behavior)
+        # CUDA kernel can be force-disabled via TARS_NO_CUDA_KERNEL=1 (enabled by default when available)
+        if os.environ.get('TARS_NO_CUDA_KERNEL', '0') == '1':
+            self.use_cuda_kernel = False
+            logger.info(">> BigVGAN CUDA kernel: force-disabled via environment")
         
         # Lazy-load QwenEmotion to save ~1GB VRAM (loaded on-demand when use_emo_text=True)
         self._qwen_emo = None
         self._qwen_emo_path = os.path.join(self.model_dir, self.cfg.qwen_emo_path)
         self._use_cpu_offload = os.environ.get('TARS_CPU_OFFLOAD', '0') == '1'
         self._use_int8 = os.environ.get('TARS_INT8', '0') == '1'  # Default OFF to keep semantic model on GPU
+        
+        # Performance tuning options
+        self._diffusion_steps = int(os.environ.get('TARS_DIFFUSION_STEPS', '20'))
+        self._cfg_rate = float(os.environ.get('TARS_CFG_RATE', '0.7'))
+        
         if self._use_cpu_offload:
             logger.info(">> CPU offloading enabled for embedding models")
         if self._use_int8:
             logger.info(">> INT8 quantization enabled for semantic model")
+        logger.info(f">> Diffusion steps: {self._diffusion_steps}, CFG rate: {self._cfg_rate}")
 
         # Initialize VRAM tracker for monitoring memory usage during loading
         from indextts.utils.vram_utils import VRAMTracker
@@ -253,6 +262,12 @@ class IndexTTS2:
         self.bigvgan = self.bigvgan.to(self.device)
         self.bigvgan.remove_weight_norm()
         self.bigvgan.eval()
+        
+        # Apply torch.compile to BigVGAN for faster inference
+        if self.use_torch_compile:
+            print_stage("Compiling BigVGAN model", "progress")
+            self.bigvgan = torch.compile(self.bigvgan, dynamic=True)
+            print_stage("BigVGAN compiled", "complete")
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -815,8 +830,8 @@ class IndexTTS2:
                 dtype = None
                 with torch.amp.autocast(text_tokens.device.type, enabled=dtype is not None, dtype=dtype):
                     m_start_time = time.perf_counter()
-                    diffusion_steps = 25
-                    inference_cfg_rate = 0.7
+                    diffusion_steps = self._diffusion_steps
+                    inference_cfg_rate = self._cfg_rate
                     latent = self.s2mel.models['gpt_layer'](latent)
                     # Reload codec if offloaded (needed for decoding)
                     if next(self.semantic_codec.parameters()).device.type == 'cpu':

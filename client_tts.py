@@ -6,10 +6,10 @@ A comprehensive client for the TARS TTS server that demonstrates all endpoints
 with elegant logging and real-time audio playback for streaming responses.
 
 Usage:
-    uv run python client_tts.py
-    uv run python client_tts.py --text "Custom text to synthesize"
-    uv run python client_tts.py --stream-only
-    uv run python client_tts.py --no-playback
+    uv run python client_tts.py                    # Run all tests
+    uv run python client_tts.py -i                 # Interactive mode
+    uv run python client_tts.py --text "Hello"     # Custom text
+    uv run python client_tts.py --no-playback      # Skip audio
 """
 
 import argparse
@@ -500,6 +500,208 @@ def test_tts_stream(client: TARSClient, text: str, play_audio: bool = True) -> b
 
 
 # =============================================================================
+# Interactive Mode
+# =============================================================================
+
+class InteractiveSession:
+    """Interactive REPL for the TARS TTS client."""
+
+    def __init__(self, client: TARSClient, play_audio: bool = True):
+        self.client = client
+        self.play_audio = play_audio
+        self.use_streaming = True
+        self.speed = 1.0
+        self.temperature = 0.8
+        self.top_p = 0.8
+        self.top_k = 30
+        self.running = True
+
+    def print_help(self) -> None:
+        """Print available commands."""
+        print()
+        print_header("Commands", 50)
+        print_item("/help", "Show this help message")
+        print_item("/quit, /exit", "Exit the client")
+        print_item("/stream", "Toggle streaming mode (currently: " +
+                   (f"{COLORS['green']}on{COLORS['reset']}" if self.use_streaming else f"{COLORS['dim']}off{COLORS['reset']}") + ")")
+        print_item("/speed <0.5-2.0>", f"Set playback speed (currently: {self.speed})")
+        print_item("/temp <0.1-1.5>", f"Set temperature (currently: {self.temperature})")
+        print_item("/settings", "Show current settings")
+        print_footer(50)
+        print()
+
+    def print_settings(self) -> None:
+        """Print current settings."""
+        print()
+        print_header("Settings", 50)
+        print_item("Streaming", f"{COLORS['green']}on{COLORS['reset']}" if self.use_streaming else f"{COLORS['dim']}off{COLORS['reset']}")
+        print_item("Speed", f"{self.speed}")
+        print_item("Temperature", f"{self.temperature}")
+        print_item("Top P", f"{self.top_p}")
+        print_item("Top K", f"{self.top_k}")
+        print_item("Playback", f"{COLORS['green']}enabled{COLORS['reset']}" if self.play_audio else f"{COLORS['dim']}disabled{COLORS['reset']}")
+        print_footer(50)
+        print()
+
+    def handle_command(self, cmd: str) -> bool:
+        """Handle a slash command. Returns True if handled."""
+        parts = cmd.strip().split(maxsplit=1)
+        command = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else None
+
+        if command in ("/quit", "/exit", "/q"):
+            self.running = False
+            print(f"\n{COLORS['dim']}Goodbye!{COLORS['reset']}\n")
+            return True
+
+        elif command == "/help":
+            self.print_help()
+            return True
+
+        elif command == "/stream":
+            self.use_streaming = not self.use_streaming
+            mode = f"{COLORS['green']}streaming{COLORS['reset']}" if self.use_streaming else f"{COLORS['cyan']}blocking{COLORS['reset']}"
+            print_stage(f"Mode set to {mode}", "info")
+            return True
+
+        elif command == "/speed":
+            if arg:
+                try:
+                    val = float(arg)
+                    if 0.5 <= val <= 2.0:
+                        self.speed = val
+                        print_stage(f"Speed set to {val}", "info")
+                    else:
+                        print_stage("Speed must be between 0.5 and 2.0", "failed")
+                except ValueError:
+                    print_stage("Invalid speed value", "failed")
+            else:
+                print_stage(f"Current speed: {self.speed}", "info")
+            return True
+
+        elif command == "/temp":
+            if arg:
+                try:
+                    val = float(arg)
+                    if 0.1 <= val <= 1.5:
+                        self.temperature = val
+                        print_stage(f"Temperature set to {val}", "info")
+                    else:
+                        print_stage("Temperature must be between 0.1 and 1.5", "failed")
+                except ValueError:
+                    print_stage("Invalid temperature value", "failed")
+            else:
+                print_stage(f"Current temperature: {self.temperature}", "info")
+            return True
+
+        elif command == "/settings":
+            self.print_settings()
+            return True
+
+        return False
+
+    def synthesize(self, text: str) -> None:
+        """Synthesize text to speech."""
+        if self.use_streaming:
+            self._synthesize_streaming(text)
+        else:
+            self._synthesize_blocking(text)
+
+    def _synthesize_streaming(self, text: str) -> None:
+        """Synthesize using streaming endpoint."""
+        player = StreamingAudioPlayer(sample_rate=22050, channels=1)
+
+        try:
+            start = time.perf_counter()
+            stream = self.client.tts_stream(
+                text,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
+                speed=self.speed,
+            )
+
+            if self.play_audio and player.available():
+                player.start()
+
+            total_bytes = 0
+            first_chunk = True
+
+            for chunk in stream:
+                if chunk:
+                    if first_chunk:
+                        ttfb = time.perf_counter() - start
+                        print_stage(f"First chunk in {format_duration(ttfb)}", "info")
+                        first_chunk = False
+
+                    total_bytes += len(chunk)
+                    if self.play_audio and player.started:
+                        player.write_chunk(chunk)
+
+            elapsed = time.perf_counter() - start
+            audio_duration = total_bytes / (22050 * 2)
+            print_stage(f"Done ({format_bytes(total_bytes)}, {format_duration(audio_duration)} audio, {format_duration(elapsed)} total)", "complete")
+
+        except Exception as e:
+            print_stage(f"Synthesis failed: {e}", "failed")
+        finally:
+            player.stop()
+
+    def _synthesize_blocking(self, text: str) -> None:
+        """Synthesize using blocking endpoint."""
+        try:
+            start = time.perf_counter()
+            print_stage("Generating...", "progress")
+
+            audio_bytes = self.client.tts(
+                text,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                top_k=self.top_k,
+                speed=self.speed,
+            )
+
+            elapsed = time.perf_counter() - start
+            print_stage(f"Generated {format_bytes(len(audio_bytes))} in {format_duration(elapsed)}", "complete")
+
+            if self.play_audio:
+                play_audio_bytes(audio_bytes, is_wav=True)
+
+        except Exception as e:
+            print_stage(f"Synthesis failed: {e}", "failed")
+
+    def run(self) -> None:
+        """Run the interactive REPL."""
+        # Try to enable readline for history
+        try:
+            import readline  # noqa: F401
+        except ImportError:
+            pass
+
+        self.print_help()
+        prompt = f"{COLORS['cyan']}TARS>{COLORS['reset']} "
+
+        while self.running:
+            try:
+                text = input(prompt).strip()
+
+                if not text:
+                    continue
+
+                if text.startswith("/"):
+                    if not self.handle_command(text):
+                        print_stage(f"Unknown command: {text.split()[0]}. Type /help for commands.", "failed")
+                else:
+                    self.synthesize(text)
+
+            except KeyboardInterrupt:
+                print(f"\n{COLORS['dim']}Use /quit to exit{COLORS['reset']}")
+            except EOFError:
+                self.running = False
+                print(f"\n{COLORS['dim']}Goodbye!{COLORS['reset']}\n")
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -510,6 +712,7 @@ def main():
         epilog="""
 Examples:
   %(prog)s                          # Run all tests with default text
+  %(prog)s -i                       # Interactive mode (REPL)
   %(prog)s --text "Hello world"     # Use custom text
   %(prog)s --stream-only            # Only test streaming endpoint
   %(prog)s --no-playback            # Skip audio playback
@@ -517,16 +720,13 @@ Examples:
         """,
     )
     parser.add_argument("--url", default="http://localhost:8009", help="Server base URL")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Interactive REPL mode")
     parser.add_argument("--text", default=None, help="Custom text to synthesize")
     parser.add_argument("--stream-only", action="store_true", help="Only test /tts/stream endpoint")
     parser.add_argument("--no-playback", action="store_true", help="Skip audio playback")
     parser.add_argument("--no-stream", action="store_true", help="Skip streaming test")
 
     args = parser.parse_args()
-
-    # Default texts
-    blocking_text = args.text or "Hello, this is a test of the TARS voice synthesis server. The quick brown fox jumps over the lazy dog."
-    stream_text = args.text or "This is a longer streaming test. We want to ensure that chunks arrive smoothly and audio plays back in real time as data is received from the server."
 
     # Client setup
     client = TARSClient(args.url)
@@ -536,6 +736,7 @@ Examples:
     print()
     print_header("TARS TTS Client", 60)
     print_item("Server", args.url)
+    print_item("Mode", f"{COLORS['magenta']}interactive{COLORS['reset']}" if args.interactive else f"{COLORS['cyan']}test{COLORS['reset']}")
     print_item("Playback", f"{COLORS['green']}enabled{COLORS['reset']}" if play_audio else f"{COLORS['dim']}disabled{COLORS['reset']}")
     print_item("Time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     print_footer(60)
@@ -548,23 +749,27 @@ Examples:
         sys.exit(1)
     print_stage("Server connected", "complete")
 
+    # Interactive mode
+    if args.interactive:
+        session = InteractiveSession(client, play_audio=play_audio)
+        session.run()
+        sys.exit(0)
+
+    # Test mode
+    blocking_text = args.text or "Hello, this is a test of the TARS voice synthesis server. The quick brown fox jumps over the lazy dog."
+    stream_text = args.text or "This is a longer streaming test. We want to ensure that chunks arrive smoothly and audio plays back in real time as data is received from the server."
+
     all_passed = True
 
     if not args.stream_only:
-        # Test /healthz
         if not test_healthz(client):
             all_passed = False
-
-        # Test /readyz
         if not test_readyz(client):
             all_passed = False
-
-        # Test /tts (blocking)
         if not test_tts(client, blocking_text, play_audio=play_audio):
             all_passed = False
 
     if not args.no_stream:
-        # Test /tts/stream (streaming with real-time playback)
         if not test_tts_stream(client, stream_text, play_audio=play_audio):
             all_passed = False
 

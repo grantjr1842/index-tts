@@ -69,6 +69,8 @@ class Settings:
     use_torch_compile: bool = os.getenv("TARS_TORCH_COMPILE", "1") == "1"
     use_cuda_kernel: Optional[bool] = True
     use_int8: bool = os.getenv("TARS_INT8", "0") == "1"  # Default OFF to keep semantic model on GPU
+    diffusion_steps: int = int(os.getenv("TARS_DIFFUSION_STEPS", "20"))
+    cfg_rate: float = float(os.getenv("TARS_CFG_RATE", "0.7"))
     enable_streaming: bool = os.getenv("TARS_ENABLE_STREAMING", "1") == "1"
     warmup_on_start: bool = os.getenv("TARS_WARMUP", "1") == "1"
 
@@ -108,6 +110,8 @@ async def lifespan(app: FastAPI):
         "Torch Compile": settings.use_torch_compile,
         "Compile Cache": TORCH_COMPILE_CACHE_DIR if settings.use_torch_compile else "N/A",
         "CUDA Kernel": settings.use_cuda_kernel,
+        "Diffusion Steps": settings.diffusion_steps,
+        "CFG Rate": settings.cfg_rate,
         "Streaming": settings.enable_streaming,
         "Warmup": settings.warmup_on_start,
         "Max Concurrency": settings.max_concurrency,

@@ -1,110 +1,119 @@
 {
-	"$schema": "https://biomejs.dev/schemas/2.3.8/schema.json",
-	"assist": {
-		"actions": {
-			"source": {
-				"organizeImports": "on"
-			}
-		},
-		"enabled": true
-	},
-	"files": {
-		"ignoreUnknown": true,
-		"includes": [
-			"app/**/*",
-			"components/**/*",
-			"hooks/**/*",
-			"lib/**/*",
-			"scripts/**/*",
-			"tests/**/*",
-			"e2e/**/*",
-			"types/**/*",
-			"*.config.*",
-			"*.{js,ts,tsx,mjs,cjs,json,md}",
-			"!**/.git",
-			"!**/.next",
-			"!**/.vercel",
-			"!**/.vscode",
-			"!**/.windsurf",
-			"!**/build",
-			"!**/coverage",
-			"!**/dist",
-			"!**/node_modules",
-			"!**/out",
-			"!**/playwright-report",
-			"!**/test-results",
-			"!**/public/assets/*.js",
-			"!**/*.tsbuildinfo",
-			"!**/*.css"
-		]
-	},
-	"formatter": {
-		"attributePosition": "auto",
-		"bracketSameLine": false,
-		"bracketSpacing": true,
-		"enabled": true,
-		"indentStyle": "tab",
-		"indentWidth": 2,
-		"lineWidth": 100
-	},
-	"css": {
-		"parser": {
-			"cssModules": true
-		},
-		"formatter": {
-			"enabled": true,
-			"indentStyle": "tab",
-			"indentWidth": 2
-		},
-		"linter": {
-			"enabled": false
-		}
-	},
-	"html": {
-		"formatter": {
-			"attributePosition": "auto",
-			"bracketSameLine": false,
-			"enabled": true,
-			"indentScriptAndStyle": true,
-			"indentStyle": "tab",
-			"indentWidth": 2,
-			"selfCloseVoidElements": "always",
-			"whitespaceSensitivity": "css"
-		}
-	},
-	"javascript": {
-		"formatter": {
-			"arrowParentheses": "always",
-			"attributePosition": "auto",
-			"bracketSameLine": false,
-			"bracketSpacing": true,
-			"enabled": true,
-			"indentStyle": "tab",
-			"indentWidth": 2,
-			"jsxQuoteStyle": "double",
-			"quoteProperties": "asNeeded",
-			"quoteStyle": "double",
-			"semicolons": "always",
-			"trailingCommas": "all"
-		}
-	},
-	"linter": {
-		"domains": {
-			"next": "recommended",
-			"react": "recommended"
-		},
-		"enabled": true,
-		"rules": {
-			"recommended": true,
-			"suspicious": {
-				"noArrayIndexKey": "warn",
-				"noUnknownAtRules": "off"
-			}
-		}
-	},
-	"vcs": {
-		"clientKind": "git",
-		"enabled": true,
-		"useIgnoreFile": true
-	}
+    "$schema": "https://biomejs.dev/schemas/2.3.8/schema.json",
+    "assist": {
+        "actions": {
+            "source": {
+                "organizeImports": "on"
+            }
+        },
+        "enabled": true
+    },
+    "files": {
+        "ignoreUnknown": true,
+        "includes": [
+            "app/**/*",
+            "components/**/*",
+            "hooks/**/*",
+            "lib/**/*",
+            "scripts/**/*",
+            "tests/**/*",
+            "e2e/**/*",
+            "types/**/*",
+            "*.config.*",
+            "*.{js,ts,tsx,mjs,cjs,json,md}",
+            "!**/.git",
+            "!**/.next",
+            "!**/.vercel",
+            "!**/.vscode",
+            "!**/.windsurf",
+            "!**/build",
+            "!**/coverage",
+            "!**/dist",
+            "!**/node_modules",
+            "!**/out",
+            "!**/playwright-report",
+            "!**/test-results",
+            "!**/public/assets/*.js",
+            "!**/*.tsbuildinfo",
+            "!**/*.css"
+        ]
+    },
+    "formatter": {
+        "attributePosition": "auto",
+        "bracketSameLine": false,
+        "bracketSpacing": true,
+        "enabled": true,
+        "indentStyle": "tab",
+        "indentWidth": 2,
+        "lineWidth": 100
+    },
+    "css": {
+        "parser": {
+            "cssModules": true
+        },
+        "formatter": {
+            "enabled": true,
+            "indentStyle": "tab",
+            "indentWidth": 2
+        },
+        "linter": {
+            "enabled": false
+        }
+    },
+    "json": {
+        "formatter": {
+            "enabled": true,
+            "expand": "always",
+            "indentStyle": "space",
+            "indentWidth": 4,
+            "trailingCommas": "all"
+        }
+    },
+    "html": {
+        "formatter": {
+            "attributePosition": "auto",
+            "bracketSameLine": false,
+            "enabled": true,
+            "indentScriptAndStyle": true,
+            "indentStyle": "tab",
+            "indentWidth": 2,
+            "selfCloseVoidElements": "always",
+            "whitespaceSensitivity": "css"
+        }
+    },
+    "javascript": {
+        "formatter": {
+            "arrowParentheses": "always",
+            "attributePosition": "auto",
+            "bracketSameLine": false,
+            "bracketSpacing": true,
+            "enabled": true,
+            "indentStyle": "tab",
+            "indentWidth": 2,
+            "jsxQuoteStyle": "double",
+            "quoteProperties": "asNeeded",
+            "quoteStyle": "double",
+            "semicolons": "always",
+            "trailingCommas": "all"
+        }
+    },
+    "linter": {
+        "domains": {
+            "next": "recommended",
+            "react": "recommended"
+        },
+        "enabled": true,
+        "rules": {
+            "recommended": true,
+            "suspicious": {
+                "noArrayIndexKey": "warn",
+                "noUnknownAtRules": "off"
+            }
+        }
+    },
+    "vcs": {
+        "clientKind": "git",
+        "enabled": true,
+        "useIgnoreFile": true
+    }
 }
