@@ -75,6 +75,9 @@ deepspeed = [
 flash-attn = [
   "flash-attn>=2.5.0",
 ]
+audio = [
+    "sounddevice>=0.5.3",
+]
 
 [project.urls]
 Homepage = "https://github.com/index-tts/index-tts"
