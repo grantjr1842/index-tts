@@ -300,6 +300,10 @@ async def generate_speech(request: TTSRequest):
 def _streaming_generator(request: TTSRequest) -> Iterable[bytes]:
     if tts_model is None:
         raise RuntimeError("Model not loaded")
+    request_id = str(uuid.uuid4())[:8]
+    print_request_start(request_id, request.text + " (stream)")
+    start_time = time.perf_counter()
+
     gen = tts_model.infer(
         spk_audio_prompt=TARS_REFERENCE_AUDIO,
         text=request.text,
@@ -309,11 +313,19 @@ def _streaming_generator(request: TTSRequest) -> Iterable[bytes]:
         top_k=request.top_k,
         stream_return=True,
     )
+    total_chunks = 0
+    total_bytes = 0
     for chunk in gen:
         wav = chunk.squeeze(0).cpu().numpy()
         buffer = io.BytesIO()
-        sf.write(buffer, wav, 24000, format="WAV")
-        yield buffer.getvalue()
+        sf.write(buffer, wav, 22050, format="WAV")
+        data = buffer.getvalue()
+        total_chunks += 1
+        total_bytes += len(data)
+        yield data
+    
+    duration = time.perf_counter() - start_time
+    print_request_complete(request_id, duration, 0, 0, message_extra=f"chunks={total_chunks} bytes={total_bytes}")
 
 
 @app.post("/tts/stream")

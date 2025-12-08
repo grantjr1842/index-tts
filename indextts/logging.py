@@ -219,7 +219,8 @@ def print_request_complete(
     duration: float,
     audio_length: float,
     rtf: float,
-    cached: bool = False
+    cached: bool = False,
+    message_extra: Optional[str] = None,
 ) -> None:
     """Print the completion of a TTS request, closing the grouped box.
     
@@ -229,6 +230,7 @@ def print_request_complete(
         audio_length: Length of generated audio in seconds
         rtf: Real-time factor
         cached: Whether the result was from cache
+        message_extra: Optional extra message to append
     """
     cache_indicator = f" {COLORS['cyan']}(cached){COLORS['reset']}" if cached else ""
     status_color = COLORS['green'] if rtf < 1.0 else COLORS['yellow'] if rtf < 2.0 else COLORS['reset']
@@ -239,6 +241,11 @@ def print_request_complete(
           f"{COLORS['dim']}Audio:{COLORS['reset']} {audio_length:.2f}s")
     print(f"{COLORS['magenta']}{BOX['vertical']}{COLORS['reset']} "
           f"{COLORS['dim']}RTF:{COLORS['reset']} {status_color}{rtf:.2f}{COLORS['reset']}")
+    
+    if message_extra:
+        print(f"{COLORS['magenta']}{BOX['vertical']}{COLORS['reset']} "
+              f"{COLORS['dim']}Info:{COLORS['reset']} {message_extra}")
+
     print(f"{COLORS['magenta']}{BOX['bottom_left']}{BOX['horizontal'] * 30}{COLORS['reset']}\n")
 
 
