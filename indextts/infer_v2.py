@@ -287,7 +287,10 @@ class IndexTTS2:
         self.gr_progress = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
         
-        logger.info(f">> Model initialization complete. VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB" if torch.cuda.is_available() else ">> Model initialization complete.")
+        if torch.cuda.is_available():
+            print_stage("Model initialization complete", "complete", message_extra=f"VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB")
+        else:
+            print_stage("Model initialization complete", "complete")
 
     @property
     def qwen_emo(self):
@@ -309,13 +312,16 @@ class IndexTTS2:
         """Offload embedding models to CPU to free VRAM for generation."""
         if not self._use_cpu_offload:
             return
-        logger.info(">> Offloading embedding models to CPU...")
+        print_stage("Offloading embedding models to CPU", "progress")
         self.semantic_model = self.semantic_model.to('cpu')
         self.semantic_codec = self.semantic_codec.to('cpu')
         self.semantic_mean = self.semantic_mean.to('cpu')
         self.semantic_std = self.semantic_std.to('cpu')
         self._cleanup_memory()
-        logger.info(f">> After offload VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB" if torch.cuda.is_available() else ">> Offload complete")
+        if torch.cuda.is_available():
+            print_stage("Embedding models offloaded", "complete", message_extra=f"VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB")
+        else:
+            print_stage("Embedding models offloaded", "complete")
     
     def _reload_embedding_models(self):
         """Reload embedding models to GPU if they were offloaded."""
@@ -328,18 +334,22 @@ class IndexTTS2:
              # Check device safely (RepCodec doesn't have .device property)
              codec_device = next(self.semantic_codec.parameters()).device
              if codec_device.type == 'cpu':
+                  print_stage("Reloading semantic codec to GPU", "progress")
                   self.semantic_codec = self.semantic_codec.to(self.device)
+                  print_stage("Semantic codec reloaded", "complete")
              return
 
         # Check model device safely
         model_device = self.semantic_model.device if hasattr(self.semantic_model, 'device') else next(self.semantic_model.parameters()).device
 
         if model_device.type == 'cpu':
-            logger.info(">> Reloading embedding models to GPU...")
+            print_stage("Reloading embedding models to GPU", "progress")
             self.semantic_model = self.semantic_model.to(self.device)
             self.semantic_codec = self.semantic_codec.to(self.device)
             self.semantic_mean = self.semantic_mean.to(self.device)
             self.semantic_std = self.semantic_std.to(self.device)
+            if torch.cuda.is_available():
+                print_stage("Embedding models reloaded", "complete", message_extra=f"VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB")
 
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):

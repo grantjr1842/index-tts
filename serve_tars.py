@@ -2,7 +2,6 @@ import io
 import json
 import os
 import hashlib
-import shutil
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Any, Dict, Tuple, Iterable
@@ -16,12 +15,12 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 # IndexTTS imports
-from indextts.logging import setup_logging
-print("Setting up logging...")
+from indextts.logging import setup_logging, print_stage
+print_stage("Setting up logging", "progress")
 setup_logging()
-print("Importing IndexTTS2...")
+print_stage("Importing IndexTTS2", "progress")
 from indextts.infer_v2 import IndexTTS2
-print("IndexTTS2 imported.")
+print_stage("IndexTTS2 imported", "complete")
 
 CACHE_DIR = os.path.join("outputs", "cache")
 TARS_REFERENCE_AUDIO = os.path.abspath(
@@ -71,13 +70,13 @@ concurrency_sem: asyncio.Semaphore | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global tts_model, executor, concurrency_sem
-    print("Loading IndexTTS2 model...")
+    print_stage("Loading IndexTTS2 model", "progress")
     if not os.path.exists(TARS_REFERENCE_AUDIO):
-        print(f"WARNING: Reference audio not found at {TARS_REFERENCE_AUDIO}")
+        print_stage(f"Reference audio not found at {TARS_REFERENCE_AUDIO}", "failed")
 
     os.makedirs(CACHE_DIR, exist_ok=True)
 
-    print(f"Using device: {settings.device}")
+    print_stage(f"Using device: {settings.device}", "info")
 
     tts_model = IndexTTS2(
         cfg_path=CONFIG_PATH,
@@ -89,9 +88,12 @@ async def lifespan(app: FastAPI):
     )
     executor = ThreadPoolExecutor(max_workers=max(settings.max_concurrency, 1))
     concurrency_sem = asyncio.Semaphore(settings.max_concurrency)
-    print("Model loaded successfully!")
+    if torch.cuda.is_available():
+        print_stage("Model loaded successfully", "complete", message_extra=f"VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB")
+    else:
+        print_stage("Model loaded successfully", "complete")
     yield
-    print("Shutting down TARS server...")
+    print_stage("Shutting down TARS server", "progress")
     if executor:
         executor.shutdown(wait=True)
 
@@ -147,7 +149,7 @@ def _blocking_infer(request: TTSRequest) -> Tuple[bytes, int, Dict[str, Any]]:
     cached = _maybe_cached(cache_payload)
     if cached:
         path, data = cached
-        print(f"Cache hit: {path}")
+        print_stage(f"Cache hit: {path}", "info")
         return data, 0, cache_payload
 
     audio_result = tts_model.infer(
@@ -261,5 +263,5 @@ async def readyz():
     return {"ready": ready, "ref_audio": TARS_REFERENCE_AUDIO, "device": settings.device}
 
 if __name__ == "__main__":
-    print("Starting Uvicorn...")
+    print_stage("Starting Uvicorn server on port 8009", "progress")
     uvicorn.run(app, host="0.0.0.0", port=8009)
