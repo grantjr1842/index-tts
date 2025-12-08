@@ -54,9 +54,10 @@ class Settings:
 
     max_concurrency: int = int(os.getenv("TARS_MAX_CONCURRENCY", "2"))
     device: Optional[str] = os.getenv("TARS_DEVICE")
-    use_fp16: Optional[bool] = True
+    use_fp16: Optional[bool] = None
     use_torch_compile: bool = os.getenv("TARS_TORCH_COMPILE", "1") == "1"
     use_cuda_kernel: Optional[bool] = True
+    use_int8: bool = os.getenv("TARS_INT8", "1") == "1"
     enable_streaming: bool = os.getenv("TARS_ENABLE_STREAMING", "1") == "1"
     warmup_on_start: bool = os.getenv("TARS_WARMUP", "1") == "1"
 
@@ -92,6 +93,7 @@ async def lifespan(app: FastAPI):
     print_config_section("TARS Server Configuration", {
         "Device": settings.device,
         "FP16": settings.use_fp16,
+        "INT8": settings.use_int8,
         "Torch Compile": settings.use_torch_compile,
         "Compile Cache": TORCH_COMPILE_CACHE_DIR if settings.use_torch_compile else "N/A",
         "CUDA Kernel": settings.use_cuda_kernel,
