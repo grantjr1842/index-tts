@@ -1,4 +1,5 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
 set -e
 
 # Navigate to project root
@@ -15,36 +16,44 @@ fi
 
 # Auto-detect GPU architecture to fix build warnings
 echo "Detecting GPU architecture..."
-if command -v python3 &> /dev/null; then
-    # Get capability as "X.Y"
-    GPU_CAP=$(python3 -c "import torch; cap=torch.cuda.get_device_capability(0); print(f'{cap[0]}.{cap[1]}')" 2>/dev/null || echo "")
-    
-    if [ -n "$GPU_CAP" ]; then
-        echo "Detected GPU compute capability: $GPU_CAP"
-        export TORCH_CUDA_ARCH_LIST="$GPU_CAP"
-        echo "Set TORCH_CUDA_ARCH_LIST=$GPU_CAP"
-    else
-        echo "Could not detect GPU capabilities (torch cuda not available?). Using default."
-    fi
-elif command -v python &> /dev/null; then
-    GPU_CAP=$(python -c "import torch; cap=torch.cuda.get_device_capability(0); print(f'{cap[0]}.{cap[1]}')" 2>/dev/null || echo "")
-    if [ -n "$GPU_CAP" ]; then
-        echo "Detected GPU compute capability: $GPU_CAP"
-        export TORCH_CUDA_ARCH_LIST="$GPU_CAP"
-        echo "Set TORCH_CUDA_ARCH_LIST=$GPU_CAP"
-        
-        # Check for Turing (7.5) to enable experimental FlashAttention build
-        if [ "$GPU_CAP" == "7.5" ]; then
-             echo "Turing GPU detected. Enabling experimental FlashAttention build (Force Source Build)."
-             export FLASH_ATTENTION_FORCE_BUILD="TRUE"
-             # Force uv to build flash-attn from source
-             export UV_NO_BINARY="flash-attn"
-        fi
-    fi
+GPU_CAP=""
 
+# Try nvidia-smi first (doesn't require python/torch installed)
+if command -v nvidia-smi &> /dev/null; then
+    GPU_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1 | tr -d ' ')
+    if [ -n "$GPU_CAP" ]; then
+        echo "Detected GPU compute capability (via nvidia-smi): $GPU_CAP"
+    fi
+fi
+
+# Fallback to python if nvidia-smi failed or returned empty
+if [ -z "$GPU_CAP" ]; then
+    if command -v python3 &> /dev/null; then
+        GPU_CAP=$(python3 -c "import torch; cap=torch.cuda.get_device_capability(0); print(f'{cap[0]}.{cap[1]}')" 2>/dev/null || echo "")
+    elif command -v, python &> /dev/null; then
+        GPU_CAP=$(python -c "import torch; cap=torch.cuda.get_device_capability(0); print(f'{cap[0]}.{cap[1]}')" 2>/dev/null || echo "")
+    fi
+    if [ -n "$GPU_CAP" ]; then
+        echo "Detected GPU compute capability (via python): $GPU_CAP"
+    fi
+fi
+
+if [ -n "$GPU_CAP" ]; then
+    export TORCH_CUDA_ARCH_LIST="$GPU_CAP"
+    echo "Set TORCH_CUDA_ARCH_LIST=$GPU_CAP"
+    
+    # Check for Turing (7.5) to enable experimental FlashAttention build
+    if [ "$GPU_CAP" == "7.5" ]; then
+            echo "Turing GPU detected. Enabling experimental FlashAttention build (Force Source Build)."
+            export FLASH_ATTENTION_FORCE_BUILD="TRUE"
+            # Pass flag to uv sync
+            UV_FLAGS="--no-binary-package flash-attn"
+    fi
+else
+    echo "Could not detect GPU capabilities (nvidia-smi failed and torch cuda not available?). Using default."
 fi
 
 echo "Syncing dependencies with extras: deepspeed, flash-attn"
-uv sync --extra deepspeed --extra flash-attn
+uv sync --extra deepspeed --extra flash-attn $UV_FLAGS --verbose
 
 echo "Optimization dependencies installed successfully."
