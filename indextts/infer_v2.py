@@ -319,11 +319,16 @@ class IndexTTS2:
         # If INT8 is enabled, semantic_model and stats must stay on CPU
         if self._use_int8:
              # Only reload semantic_codec if needed
-             if self.semantic_codec.device.type == 'cpu':
+             # Check device safely (RepCodec doesn't have .device property)
+             codec_device = next(self.semantic_codec.parameters()).device
+             if codec_device.type == 'cpu':
                   self.semantic_codec = self.semantic_codec.to(self.device)
              return
 
-        if self.semantic_model.device.type == 'cpu':
+        # Check model device safely
+        model_device = self.semantic_model.device if hasattr(self.semantic_model, 'device') else next(self.semantic_model.parameters()).device
+
+        if model_device.type == 'cpu':
             logger.info(">> Reloading embedding models to GPU...")
             self.semantic_model = self.semantic_model.to(self.device)
             self.semantic_codec = self.semantic_codec.to(self.device)
@@ -786,6 +791,11 @@ class IndexTTS2:
                     diffusion_steps = 25
                     inference_cfg_rate = 0.7
                     latent = self.s2mel.models['gpt_layer'](latent)
+                    # Reload codec if offloaded (needed for decoding)
+                    if next(self.semantic_codec.parameters()).device.type == 'cpu':
+                        self.semantic_codec = self.semantic_codec.to(self.device)
+                    
+                    # decode semantic code
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
                     S_infer = S_infer.transpose(1, 2)
                     S_infer = S_infer + latent
