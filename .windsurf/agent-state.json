@@ -8,9 +8,11 @@
         {"description": "Update serve_tars.py to use beautified logging", "done": true},
         {"description": "Add VRAM usage reporting in inference timing logs", "done": true},
         {"description": "Update offload/reload methods with formatted output", "done": true},
-        {"description": "Test server startup and inference", "done": true}
+        {"description": "Test server startup and inference", "done": true},
+        {"description": "Add graceful shutdown handling", "done": true},
+        {"description": "Add grouped sections and request logging", "done": true}
     ],
-    "current_task_index": 6,
+    "current_task_index": 8,
     "merge_sha": null,
-    "last_updated": "2025-12-08T03:20:00Z"
+    "last_updated": "2025-12-08T03:25:00Z"
 }

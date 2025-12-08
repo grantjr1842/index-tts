@@ -195,7 +195,7 @@ def print_config_section(title: str, config: Dict[str, Any], width: int = 60) ->
 
 
 def print_request_start(request_id: str, text: str, max_text_len: int = 50) -> None:
-    """Print the start of a TTS request.
+    """Print the start of a TTS request in a grouped box.
     
     Args:
         request_id: Unique identifier for the request
@@ -204,9 +204,14 @@ def print_request_start(request_id: str, text: str, max_text_len: int = 50) -> N
     """
     truncated = text[:max_text_len] + "..." if len(text) > max_text_len else text
     timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"{STATUS_SYMBOLS['request']} {COLORS['dim']}[{timestamp}]{COLORS['reset']} "
-          f"{COLORS['magenta']}#{request_id}{COLORS['reset']} "
-          f"\"{truncated}\"")
+    
+    # Print request header
+    print(f"\n{COLORS['magenta']}{BOX['top_left']}{BOX['horizontal'] * 3} "
+          f"Request #{request_id} {BOX['horizontal'] * 3}{COLORS['reset']}")
+    print(f"{COLORS['magenta']}{BOX['vertical']}{COLORS['reset']} "
+          f"{COLORS['dim']}Time:{COLORS['reset']} {timestamp}")
+    print(f"{COLORS['magenta']}{BOX['vertical']}{COLORS['reset']} "
+          f"{COLORS['dim']}Text:{COLORS['reset']} \"{truncated}\"")
 
 
 def print_request_complete(
@@ -216,7 +221,7 @@ def print_request_complete(
     rtf: float,
     cached: bool = False
 ) -> None:
-    """Print the completion of a TTS request.
+    """Print the completion of a TTS request, closing the grouped box.
     
     Args:
         request_id: Unique identifier for the request
@@ -225,13 +230,16 @@ def print_request_complete(
         rtf: Real-time factor
         cached: Whether the result was from cache
     """
-    timestamp = datetime.now().strftime("%H:%M:%S")
     cache_indicator = f" {COLORS['cyan']}(cached){COLORS['reset']}" if cached else ""
-    print(f"{STATUS_SYMBOLS['response']} {COLORS['dim']}[{timestamp}]{COLORS['reset']} "
-          f"{COLORS['cyan']}#{request_id}{COLORS['reset']}{cache_indicator} "
-          f"{COLORS['dim']}duration:{COLORS['reset']}{duration:.2f}s "
-          f"{COLORS['dim']}audio:{COLORS['reset']}{audio_length:.2f}s "
-          f"{COLORS['dim']}RTF:{COLORS['reset']}{rtf:.2f}")
+    status_color = COLORS['green'] if rtf < 1.0 else COLORS['yellow'] if rtf < 2.0 else COLORS['reset']
+    
+    print(f"{COLORS['magenta']}{BOX['vertical']}{COLORS['reset']} "
+          f"{COLORS['dim']}Duration:{COLORS['reset']} {duration:.2f}s{cache_indicator}")
+    print(f"{COLORS['magenta']}{BOX['vertical']}{COLORS['reset']} "
+          f"{COLORS['dim']}Audio:{COLORS['reset']} {audio_length:.2f}s")
+    print(f"{COLORS['magenta']}{BOX['vertical']}{COLORS['reset']} "
+          f"{COLORS['dim']}RTF:{COLORS['reset']} {status_color}{rtf:.2f}{COLORS['reset']}")
+    print(f"{COLORS['magenta']}{BOX['bottom_left']}{BOX['horizontal'] * 30}{COLORS['reset']}\n")
 
 
 class GracefulShutdown:
