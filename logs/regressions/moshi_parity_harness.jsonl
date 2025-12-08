@@ -1,8 +1,0 @@
-{"id": "case_001", "user_text": "Can you draft the outage note for the payments API?", "assistant_text": "Sure. I will write a concise notice with impact, timeline, and action items."}
-{"id": "case_002", "user_text": "Summarize the three biggest launch risks in one paragraph.", "assistant_text": "The key risks are data migration drift, untested rollback, and brittle telemetry. I'll propose owners for each."}
-{"id": "case_003", "user_text": "Rewrite this in a calmer tone: the quota reset failed again.", "assistant_text": "The quota reset did not complete. We're investigating and will update with next steps."}
-{"id": "case_004", "user_text": "Give me two bullet points for the exec brief on latency gains.", "assistant_text": "p95 improved from 480ms to 220ms after the cache rollout; write-path errors held steady at 0.02%."}
-{"id": "case_005", "user_text": "Draft a friendly reminder about the incident review tomorrow morning.", "assistant_text": "Reminder: the incident review starts at 9am. Please bring timelines, fixes, and any open questions."}
-{"id": "case_006", "user_text": "Offer a one-sentence product vision for the voice inbox.", "assistant_text": "Voice inbox lets people triage every voicemail with instant transcripts and smart summaries."}
-{"id": "case_007", "user_text": "Can you suggest a brief customer apology for the late invoices?", "assistant_text": "We apologize for the delayed invoices; we're correcting the issue and will resend with a clear schedule."}
-{"id": "case_008", "user_text": "Write a two-line CTA inviting beta users to try the new tone controls.", "assistant_text": "Try the new tone controls to keep responses calm or energetic on demand. Beta access is live today."}

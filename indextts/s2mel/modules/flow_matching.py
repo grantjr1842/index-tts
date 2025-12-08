@@ -181,6 +181,6 @@ class CFM(BASECFM):
             torch._inductor.config.reorder_for_compute_comm_overlap = True
         self.estimator = torch.compile(
             self.estimator, 
-            fullgraph=True,
+            # fullgraph=True,
             dynamic=True,
         )

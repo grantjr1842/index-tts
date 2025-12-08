@@ -110,13 +110,13 @@ class IndexTTS2:
         self.stop_mel_token = self.cfg.gpt.stop_mel_token
         self.use_accel = use_accel
         self.use_torch_compile = use_torch_compile
-        self.use_cuda_kernel = False # Force disable to avoid hang
+        self.use_cuda_kernel = False  # Force disable to avoid hang (original behavior)
         
         # Lazy-load QwenEmotion to save ~1GB VRAM (loaded on-demand when use_emo_text=True)
         self._qwen_emo = None
         self._qwen_emo_path = os.path.join(self.model_dir, self.cfg.qwen_emo_path)
         self._use_cpu_offload = os.environ.get('TARS_CPU_OFFLOAD', '0') == '1'
-        self._use_int8 = os.environ.get('TARS_INT8', '1') == '1'
+        self._use_int8 = os.environ.get('TARS_INT8', '0') == '1'  # Default OFF to keep semantic model on GPU
         if self._use_cpu_offload:
             logger.info(">> CPU offloading enabled for embedding models")
         if self._use_int8:
@@ -137,6 +137,13 @@ class IndexTTS2:
             self.gpt.eval().half()
         else:
             self.gpt.eval()
+        
+        # Note: torch.compile on GPT was tested but caused startup hangs with reduce-overhead mode.
+        # The S2Mel/CFM model already uses torch.compile which provides the main benefit.
+        # if self.use_torch_compile:
+        #     print_stage(\"Compiling GPT model\", \"progress\")
+        #     self.gpt = torch.compile(self.gpt, mode=\"reduce-overhead\")
+        #     print_stage(\"GPT model compiled\", \"complete\")
 
         if use_deepspeed:
             try:

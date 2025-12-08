@@ -10,13 +10,19 @@ from typing import Optional, Any, Dict, Tuple, Iterable
 
 # === Torch Inductor config (MUST be set before importing torch) ===
 # Enable torch.compile cache to persist compiled graphs across restarts
-TORCH_COMPILE_CACHE_DIR = os.path.join("checkpoints", "torch_compile_cache")
+TORCH_COMPILE_CACHE_DIR = os.path.abspath(os.path.join("checkpoints", "torch_compile_cache"))
 os.makedirs(TORCH_COMPILE_CACHE_DIR, exist_ok=True)
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = TORCH_COMPILE_CACHE_DIR
 # Enable FX graph cache for torch.compile
 os.environ["TORCHINDUCTOR_FX_GRAPH_CACHE"] = "1"
 # Disable max_autotune_gemm which requires more SMs than available on smaller GPUs
 os.environ["TORCHINDUCTOR_MAX_AUTOTUNE_GEMM"] = "0"
+# Ensure cache dir exists
+if not os.path.exists(TORCH_COMPILE_CACHE_DIR):
+    os.makedirs(TORCH_COMPILE_CACHE_DIR, exist_ok=True)
+    print(f"Created torch compile cache directory: {TORCH_COMPILE_CACHE_DIR}")
+else:
+    print(f"Using existing torch compile cache directory: {TORCH_COMPILE_CACHE_DIR}")
 
 import numpy as np
 import torch
@@ -62,7 +68,7 @@ class Settings:
     use_fp16: Optional[bool] = None
     use_torch_compile: bool = os.getenv("TARS_TORCH_COMPILE", "1") == "1"
     use_cuda_kernel: Optional[bool] = True
-    use_int8: bool = os.getenv("TARS_INT8", "1") == "1"
+    use_int8: bool = os.getenv("TARS_INT8", "0") == "1"  # Default OFF to keep semantic model on GPU
     enable_streaming: bool = os.getenv("TARS_ENABLE_STREAMING", "1") == "1"
     warmup_on_start: bool = os.getenv("TARS_WARMUP", "1") == "1"
 
@@ -131,26 +137,61 @@ async def lifespan(app: FastAPI):
     print_section_footer()
     
     # Warmup section - triggers torch.compile and caches the compiled graph
+    # Warmup section - triggers torch.compile and caches the compiled graph
     if settings.warmup_on_start and settings.use_torch_compile:
         print()
         print_section_header("Warmup (torch.compile)", 50)
-        print_section_item("Status", "Running warmup inference...")
-        warmup_start = time.perf_counter()
-        try:
-            # Run a minimal inference to trigger torch.compile
-            _ = tts_model.infer(
-                spk_audio_prompt=TARS_REFERENCE_AUDIO,
-                text="Hi",  # Minimal text for fast warmup
-                output_path=None,
-                return_audio=True,
-                return_numpy=True,
-            )
-            warmup_time = time.perf_counter() - warmup_start
-            print_section_item("Duration", f"{warmup_time:.2f}s")
-            print_section_item("Cache", f"Saved to {TORCH_COMPILE_CACHE_DIR}")
-            print_section_item("Result", f"{COLORS['green']}Success{COLORS['reset']}")
-        except Exception as e:
-            print_section_item("Result", f"{COLORS['red']}Failed: {e}{COLORS['reset']}")
+        
+        # Check if cache is already populated
+        cache_exists = os.path.exists(TORCH_COMPILE_CACHE_DIR) and len(os.listdir(TORCH_COMPILE_CACHE_DIR)) > 0
+        
+        should_invalidate = False
+        if cache_exists:
+            # Check modification times
+            cache_mtime = os.path.getmtime(TORCH_COMPILE_CACHE_DIR)
+            
+            # Dependencies to check against cache
+            deps = [os.path.abspath(__file__)]
+            if os.path.exists(CONFIG_PATH):
+                deps.append(os.path.abspath(CONFIG_PATH))
+                
+            for dep in deps:
+                if os.path.getmtime(dep) > cache_mtime:
+                    print_section_item("Invalidating", f"{os.path.basename(dep)} changed")
+                    should_invalidate = True
+                    break
+        
+        if cache_exists and not should_invalidate:
+            print_section_item("Status", "Cache found. Skipping warmup inference.")
+            print_section_item("Cache", f"Found in {TORCH_COMPILE_CACHE_DIR}")
+            print_section_item("Result", f"{COLORS['green']}Skipped{COLORS['reset']}")
+        else:
+            if should_invalidate:
+                import shutil
+                print_section_item("Status", "Invalidating stale cache...")
+                try:
+                    shutil.rmtree(TORCH_COMPILE_CACHE_DIR)
+                    os.makedirs(TORCH_COMPILE_CACHE_DIR, exist_ok=True)
+                except Exception as e:
+                     print_section_item("Warning", f"Failed to clear cache: {e}")
+
+            print_section_item("Status", "Running warmup inference...")
+            warmup_start = time.perf_counter()
+            try:
+                # Run a minimal inference to trigger torch.compile
+                _ = tts_model.infer(
+                    spk_audio_prompt=TARS_REFERENCE_AUDIO,
+                    text="Hi",  # Minimal text for fast warmup
+                    output_path=None,
+                    return_audio=True,
+                    return_numpy=True,
+                )
+                warmup_time = time.perf_counter() - warmup_start
+                print_section_item("Duration", f"{warmup_time:.2f}s")
+                print_section_item("Cache", f"Saved to {TORCH_COMPILE_CACHE_DIR}")
+                print_section_item("Result", f"{COLORS['green']}Success{COLORS['reset']}")
+            except Exception as e:
+                print_section_item("Result", f"{COLORS['red']}Failed: {e}{COLORS['reset']}")
         print_section_footer(50)
     
     # Server ready section
@@ -297,35 +338,66 @@ async def generate_speech(request: TTSRequest):
     return await _with_concurrency_limit(run())
 
 
-def _streaming_generator(request: TTSRequest) -> Iterable[bytes]:
+def _streaming_producer(request: TTSRequest, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
+    """
+    Producer function that runs in a thread pool and pushes audio chunks to the queue.
+    This enables true streaming - chunks are sent to the client as soon as they're generated.
+    """
     if tts_model is None:
-        raise RuntimeError("Model not loaded")
+        asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+        return
+    
     request_id = str(uuid.uuid4())[:8]
     print_request_start(request_id, request.text + " (stream)")
     start_time = time.perf_counter()
 
-    gen = tts_model.infer(
-        spk_audio_prompt=TARS_REFERENCE_AUDIO,
-        text=request.text,
-        output_path=None,
-        temperature=request.temperature,
-        top_p=request.top_p,
-        top_k=request.top_k,
-        stream_return=True,
-    )
-    total_chunks = 0
-    total_bytes = 0
-    for chunk in gen:
-        wav = chunk.squeeze(0).cpu().numpy()
-        buffer = io.BytesIO()
-        sf.write(buffer, wav, 22050, format="WAV")
-        data = buffer.getvalue()
-        total_chunks += 1
-        total_bytes += len(data)
-        yield data
-    
-    duration = time.perf_counter() - start_time
-    print_request_complete(request_id, duration, 0, 0, message_extra=f"chunks={total_chunks} bytes={total_bytes}")
+    try:
+        gen = tts_model.infer(
+            spk_audio_prompt=TARS_REFERENCE_AUDIO,
+            text=request.text,
+            output_path=None,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            top_k=request.top_k,
+            stream_return=True,
+        )
+        total_chunks = 0
+        total_bytes = 0
+        for chunk in gen:
+            # chunk is (1, T) float32 but ALREADY SCALED to [-32767, 32767] by IndexTTS2
+            wav = chunk.squeeze(0).cpu().numpy()
+            # Just cast to int16, DO NOT multiply by 32767 again
+            wav_int16 = wav.astype(np.int16)
+            data = wav_int16.tobytes()
+            total_chunks += 1
+            total_bytes += len(data)
+            # Put chunk in queue - this is thread-safe
+            asyncio.run_coroutine_threadsafe(queue.put(data), loop)
+        
+        duration = time.perf_counter() - start_time
+        print_request_complete(request_id, duration, 0, 0, message_extra=f"chunks={total_chunks} bytes={total_bytes}")
+    except Exception as e:
+        # Put error in queue so consumer can handle it
+        asyncio.run_coroutine_threadsafe(queue.put(e), loop)
+    finally:
+        # Signal end of stream
+        asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+
+async def _streaming_consumer(queue: asyncio.Queue):
+    """
+    Async generator that yields chunks from the queue as they arrive.
+    This enables true real-time streaming to the client.
+    """
+    while True:
+        chunk = await queue.get()
+        if chunk is None:
+            # End of stream
+            break
+        if isinstance(chunk, Exception):
+            # Producer encountered an error
+            raise chunk
+        yield chunk
 
 
 @app.post("/tts/stream")
@@ -339,13 +411,25 @@ async def generate_speech_stream(request: TTSRequest):
 
     async def run_stream():
         loop = asyncio.get_running_loop()
-        try:
-            gen = await loop.run_in_executor(executor, _streaming_generator, request)  # type: ignore[arg-type]
-            return StreamingResponse(gen, media_type="audio/wav")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        queue: asyncio.Queue = asyncio.Queue()
+        
+        # Start producer in thread pool - it will push chunks to queue as they're generated
+        if executor is not None:
+            executor.submit(_streaming_producer, request, queue, loop)
+        else:
+            raise HTTPException(status_code=503, detail="Server not ready")
+        
+        # Return streaming response with async consumer
+        # Media type is audio/pcm since we're sending raw S16LE PCM data, not WAV
+        return StreamingResponse(
+            _streaming_consumer(queue),
+            media_type="audio/pcm",
+            headers={
+                "X-Audio-Sample-Rate": "22050",
+                "X-Audio-Channels": "1",
+                "X-Audio-Format": "s16le",
+            }
+        )
 
     return await _with_concurrency_limit(run_stream())
 
