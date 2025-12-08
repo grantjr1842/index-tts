@@ -10,7 +10,7 @@ def test_health():
     try:
         resp = requests.get(f"{BASE_URL}/healthz")
         resp.raise_for_status()
-        assert resp.text == "ok"
+        assert resp.json() == {"status": "ok"}
         print("✅ /healthz passed")
     except Exception as e:
         print(f"❌ /healthz failed: {e}")
@@ -19,7 +19,7 @@ def test_health():
 def test_tts_post():
     print("Testing /tts (blocking)...")
     payload = {
-        "text": "Hello, this is a test of the Rust server.",
+        "text": "Hello, this is a test of the Python server.",
         "temperature": 0.7
     }
     try:
@@ -89,7 +89,7 @@ if __name__ == "__main__":
             print(f"Server not ready, retrying ({i+1}/5)...")
             time.sleep(2)
     else:
-        print("❌ Server unreachable. Make sure 'cargo run' is running in 'server/' dir.")
+        print("❌ Server unreachable. Make sure 'python serve_tars.py' is running.")
         sys.exit(1)
 
     test_health()
