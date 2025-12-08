@@ -112,8 +112,11 @@ class IndexTTS2:
         self._qwen_emo = None
         self._qwen_emo_path = os.path.join(self.model_dir, self.cfg.qwen_emo_path)
         self._use_cpu_offload = os.environ.get('TARS_CPU_OFFLOAD', '0') == '1'
+        self._use_int8 = os.environ.get('TARS_INT8', '0') == '1'
         if self._use_cpu_offload:
             logger.info(">> CPU offloading enabled for embedding models")
+        if self._use_int8:
+            logger.info(">> INT8 quantization enabled for semantic model")
 
         logger.info("Initializing UnifiedVoice...")
         self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
@@ -165,6 +168,19 @@ class IndexTTS2:
         self.semantic_mean = self.semantic_mean.to(self.device)
         self.semantic_std = self.semantic_std.to(self.device)
         logger.info(">> Loaded Semantic Model")
+        
+        # Apply INT8 quantization to semantic model if enabled
+        if self._use_int8:
+            logger.info(">> Applying INT8 quantization to semantic_model...")
+            from indextts.utils.vram_utils import quantize_model_int8
+            self.semantic_model = quantize_model_int8(self.semantic_model)
+            # Also move mean/std to CPU so all semantic operations are on CPU
+            self.semantic_mean = self.semantic_mean.cpu()
+            self.semantic_std = self.semantic_std.cpu()
+            logger.info(f">> semantic_model quantized to INT8 (now on CPU)")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
 
         semantic_codec = build_semantic_codec(self.cfg.semantic_codec)
         semantic_code_ckpt = hf_hub_download("amphion/MaskGCT", filename="semantic_codec/model.safetensors")
@@ -177,6 +193,7 @@ class IndexTTS2:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
+
 
         s2mel_path = os.path.join(self.model_dir, self.cfg.s2mel_checkpoint)
         s2mel = MyModel(self.cfg.s2mel, use_gpt_latent=True)
@@ -298,6 +315,14 @@ class IndexTTS2:
         """Reload embedding models to GPU if they were offloaded."""
         if not self._use_cpu_offload:
             return
+        
+        # If INT8 is enabled, semantic_model and stats must stay on CPU
+        if self._use_int8:
+             # Only reload semantic_codec if needed
+             if self.semantic_codec.device.type == 'cpu':
+                  self.semantic_codec = self.semantic_codec.to(self.device)
+             return
+
         if self.semantic_model.device.type == 'cpu':
             logger.info(">> Reloading embedding models to GPU...")
             self.semantic_model = self.semantic_model.to(self.device)
@@ -307,9 +332,25 @@ class IndexTTS2:
 
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):
-        # Ensure semantic model is on the same device as input (handles CPU offload case)
-        if hasattr(self.semantic_model, 'device') and self.semantic_model.device != input_features.device:
+        # Handle INT8 quantized model (runs on CPU)
+        if self._use_int8:
+            # Move inputs to CPU for INT8 inference
+            input_cpu = input_features.cpu()
+            mask_cpu = attention_mask.cpu()
+            vq_emb = self.semantic_model(
+                input_features=input_cpu,
+                attention_mask=mask_cpu,
+                output_hidden_states=True,
+            )
+            feat = vq_emb.hidden_states[17]  # (B, T, C)
+            # semantic_mean/std are on CPU, normalize on CPU then move to GPU
+            feat = (feat - self.semantic_mean) / self.semantic_std
+            return feat.to(self.device)
+        
+        # Handle CPU offload case
+        if self._use_cpu_offload and hasattr(self.semantic_model, 'device') and self.semantic_model.device != input_features.device:
             self._reload_embedding_models()
+        
         vq_emb = self.semantic_model(
             input_features=input_features,
             attention_mask=attention_mask,
