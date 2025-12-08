@@ -1,34 +1,22 @@
 {
-    "phase": "implementing",
-    "issue_number": 23,
-    "branch": "feature/inference-speed-optimization",
+    "phase": "merging",
+    "issue_number": 37,
+    "branch": null,
     "tasks": [
         {
-            "description": "Update Rust server (tts.rs) to pass use_torch_compile=true and use_accel=true to IndexTTS2",
-            "done": false
+            "description": "Fix get_emb() device synchronization",
+            "done": true
         },
         {
-            "description": "Add environment variable support (TARS_TORCH_COMPILE, TARS_ACCEL) for toggling optimizations",
-            "done": false
+            "description": "Fix streaming endpoint format",
+            "done": true
         },
         {
-            "description": "Add server warmup on startup - perform dummy inference to cache speaker embeddings",
-            "done": false
-        },
-        {
-            "description": "Add timing/profiling logs to identify bottlenecks",
-            "done": false
-        },
-        {
-            "description": "Document GPU memory requirements and concurrent usage limitations in README",
-            "done": false
-        },
-        {
-            "description": "Test and benchmark inference speed with optimizations enabled",
-            "done": false
+            "description": "Run test_rust_server.py",
+            "done": true
         }
     ],
-    "current_task_index": 0,
+    "current_task_index": 3,
     "merge_sha": null,
-    "last_updated": "2025-12-07T18:10:00-05:00"
+    "last_updated": "2025-12-07T20:42:00-05:00"
 }

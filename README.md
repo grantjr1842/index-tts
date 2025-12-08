@@ -328,17 +328,21 @@ The server supports several environment variables to tune performance:
 | `TARS_DEVICE` | `cuda:0` | GPU device to use. |
 | `TARS_FP16` | `1` (True) | Enable FP16 half-precision inference (faster, less VRAM). |
 | `TARS_TORCH_COMPILE` | `1` (True) | Enable `torch.compile` for graph optimization (10-30% speedup). |
-| `TARS_ACCEL` | `1` (True) | Enable accelerated GPT2 inference. |
+| `TARS_ACCEL` | `0` (False) | Enable accelerated GPT2 inference (requires Ampere+ GPU). |
+| `TARS_DEEPSPEED` | `0` (False) | Enable DeepSpeed inference optimization (adds ~100MB VRAM overhead). |
+| `TARS_CPU_OFFLOAD` | `0` (False) | Offload embedding models to CPU after speaker extraction (~2GB VRAM savings). |
 | `TARS_WARMUP` | `1` (True) | Perform a dummy inference on startup to pre-cache embeddings and compilation. |
 
 #### ⚠️ GPU Memory Requirements
 
 IndexTTS2 is a large model.
-- **IndexTTS2 VRAM Usage:** ~4GB (FP16) to ~6GB+ (FP32).
+- **IndexTTS2 VRAM Usage:** ~6-7GB (FP16 with all models loaded).
+- **With CPU Offloading:** ~4-5GB (FP16, `TARS_CPU_OFFLOAD=1`).
 - **Concurrent Usage:** Running IndexTTS2 alongside other models (like `moshi-server` for STT) on a single 8GB GPU is **NOT RECOMMENDED**. It will likely lead to Out-Of-Memory (OOM) errors or severe performance degradation due to swapping.
 - **Recommendation:**
-    - Use a GPU with **16GB+ VRAM** for concurrent pipelines.
-    - If using an 8GB card, ensure **exclusive GPU access** for IndexTTS2 by stopping other GPU processes.
+    - For **8GB GPUs**: Enable `TARS_CPU_OFFLOAD=1` and ensure exclusive GPU access.
+    - For **12GB+ GPUs**: Can run with `TARS_DEEPSPEED=1` for additional performance.
+    - For **concurrent pipelines**: Use a GPU with **16GB+ VRAM**.
 
 ---
 
