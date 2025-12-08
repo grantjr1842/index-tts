@@ -3,6 +3,7 @@ from indextts.logging import get_logger
 from subprocess import CalledProcessError
 
 os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
+import gc
 import json
 import re
 import time
@@ -107,7 +108,12 @@ class IndexTTS2:
         self.use_torch_compile = use_torch_compile
         self.use_cuda_kernel = False # Force disable to avoid hang
         
-        self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path))
+        # Lazy-load QwenEmotion to save ~1GB VRAM (loaded on-demand when use_emo_text=True)
+        self._qwen_emo = None
+        self._qwen_emo_path = os.path.join(self.model_dir, self.cfg.qwen_emo_path)
+        self._use_cpu_offload = os.environ.get('TARS_CPU_OFFLOAD', '0') == '1'
+        if self._use_cpu_offload:
+            logger.info(">> CPU offloading enabled for embedding models")
 
         logger.info("Initializing UnifiedVoice...")
         self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
@@ -132,6 +138,11 @@ class IndexTTS2:
 
         self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16)
         logger.info("GPT config post-initialized")
+        
+        # Clear GPU cache after GPT initialization to free memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
 
         if self.use_cuda_kernel:
             # preload the CUDA kernel for BigVGAN
@@ -161,6 +172,11 @@ class IndexTTS2:
         self.semantic_codec = semantic_codec.to(self.device)
         self.semantic_codec.eval()
         logger.info('>> semantic_codec weights restored from: {}'.format(semantic_code_ckpt))
+        
+        # Clear GPU cache after semantic model loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
 
         s2mel_path = os.path.join(self.model_dir, self.cfg.s2mel_checkpoint)
         s2mel = MyModel(self.cfg.s2mel, use_gpt_latent=True)
@@ -200,6 +216,11 @@ class IndexTTS2:
         self.bigvgan.remove_weight_norm()
         self.bigvgan.eval()
         logger.info(f">> bigvgan weights restored from: {bigvgan_name}")
+        
+        # Clear GPU cache after vocoder loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
 
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
         self.normalizer = TextNormalizer()
@@ -242,9 +263,53 @@ class IndexTTS2:
         # 进度引用显示（可选）
         self.gr_progress = None
         self.model_version = self.cfg.version if hasattr(self.cfg, "version") else None
+        
+        logger.info(f">> Model initialization complete. VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB" if torch.cuda.is_available() else ">> Model initialization complete.")
+
+    @property
+    def qwen_emo(self):
+        """Lazy-load QwenEmotion model on first access."""
+        if self._qwen_emo is None:
+            logger.info("Loading QwenEmotion model (lazy-loaded)...")
+            self._qwen_emo = QwenEmotion(self._qwen_emo_path)
+            logger.info(">> QwenEmotion loaded")
+        return self._qwen_emo
+    
+    def _cleanup_memory(self):
+        """Force memory cleanup - useful between model loads or after inference."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()  # Ensure cache is actually cleared
+        gc.collect()
+    
+    def _offload_embedding_models(self):
+        """Offload embedding models to CPU to free VRAM for generation."""
+        if not self._use_cpu_offload:
+            return
+        logger.info(">> Offloading embedding models to CPU...")
+        self.semantic_model = self.semantic_model.to('cpu')
+        self.semantic_codec = self.semantic_codec.to('cpu')
+        self.semantic_mean = self.semantic_mean.to('cpu')
+        self.semantic_std = self.semantic_std.to('cpu')
+        self._cleanup_memory()
+        logger.info(f">> After offload VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB" if torch.cuda.is_available() else ">> Offload complete")
+    
+    def _reload_embedding_models(self):
+        """Reload embedding models to GPU if they were offloaded."""
+        if not self._use_cpu_offload:
+            return
+        if self.semantic_model.device.type == 'cpu':
+            logger.info(">> Reloading embedding models to GPU...")
+            self.semantic_model = self.semantic_model.to(self.device)
+            self.semantic_codec = self.semantic_codec.to(self.device)
+            self.semantic_mean = self.semantic_mean.to(self.device)
+            self.semantic_std = self.semantic_std.to(self.device)
 
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):
+        # Ensure semantic model is on the same device as input (handles CPU offload case)
+        if hasattr(self.semantic_model, 'device') and self.semantic_model.device != input_features.device:
+            self._reload_embedding_models()
         vq_emb = self.semantic_model(
             input_features=input_features,
             attention_mask=attention_mask,
@@ -463,12 +528,15 @@ class IndexTTS2:
 
         # 如果参考音频改变了，才需要重新生成, 提升速度
         if self.cache_spk_cond is None or self.cache_spk_audio_prompt != spk_audio_prompt:
+            # Reload embedding models if they were offloaded
+            self._reload_embedding_models()
+            
             if self.cache_spk_cond is not None:
                 self.cache_spk_cond = None
                 self.cache_s2mel_style = None
                 self.cache_s2mel_prompt = None
                 self.cache_mel = None
-                # torch.cuda.empty_cache() # Removed for performance
+                torch.cuda.empty_cache()  # Re-enabled for memory management
             audio,sr = self._load_and_cut_audio(spk_audio_prompt,15,verbose)
             audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
             audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
@@ -500,6 +568,9 @@ class IndexTTS2:
             self.cache_s2mel_prompt = prompt_condition
             self.cache_spk_audio_prompt = spk_audio_prompt
             self.cache_mel = ref_mel
+            
+            # Offload embedding models to CPU to free VRAM for generation
+            self._offload_embedding_models()
         else:
             style = self.cache_s2mel_style
             prompt_condition = self.cache_s2mel_prompt
@@ -522,7 +593,7 @@ class IndexTTS2:
         if self.cache_emo_cond is None or self.cache_emo_audio_prompt != emo_audio_prompt:
             if self.cache_emo_cond is not None:
                 self.cache_emo_cond = None
-                # torch.cuda.empty_cache() # Removed for performance
+                torch.cuda.empty_cache()  # Re-enabled for memory management
             emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt,15,verbose,sr=16000)
             emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
             emo_input_features = emo_inputs["input_features"]
@@ -717,6 +788,10 @@ class IndexTTS2:
                     wavs.append(wav) # Keep on GPU until end
 
         end_time = time.perf_counter()
+        
+        # Early return for streaming mode - wavs list is empty in stream mode
+        if stream_return:
+            return
 
         self._set_gr_progress(0.9, "saving audio...")
         wavs = self.insert_interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)

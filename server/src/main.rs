@@ -73,7 +73,8 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "interstellar-tars-01-resemble-denoised.wav".to_string());
         
         let warmup_params = TtsParams {
-            text: "Warming up.".to_string(),
+            // Use minimal text to reduce memory for warmup
+            text: "Hi".to_string(),
             ref_audio,
             temperature: 0.8,
             top_p: 0.8,
@@ -88,6 +89,26 @@ async fn main() -> anyhow::Result<()> {
             }
             Err(e) => {
                 eprintln!("Warmup inference failed (non-fatal): {}", e);
+                
+                // Print GPU memory diagnostics on failure
+                #[allow(deprecated)]
+                let _ = Python::with_gil(|py| {
+                    if let Ok(torch) = py.import("torch") {
+                        if let Ok(cuda) = torch.getattr("cuda") {
+                            if let Ok(true) = cuda.getattr("is_available")?.call0()?.extract::<bool>() {
+                                if let Ok(allocated) = cuda.call_method0("memory_allocated") {
+                                    if let Ok(reserved) = cuda.call_method0("memory_reserved") {
+                                        if let Ok(total) = cuda.getattr("get_device_properties")?.call1((0,))?.getattr("total_memory") {
+                                            eprintln!("GPU Memory - Allocated: {} bytes, Reserved: {} bytes, Total: {} bytes", 
+                                                allocated, reserved, total);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok::<(), PyErr>(())
+                });
             }
         }
     } else {
@@ -165,7 +186,10 @@ async fn stream_handler(
 
                             let buffer = io.call_method0("BytesIO")?;
 
-                            sf.call_method1("write", (&buffer, wav_numpy, 24000, "WAV"))?;
+                            // Use keyword argument for format when writing to BytesIO
+                            let sf_kwargs = pyo3::types::PyDict::new(py);
+                            sf_kwargs.set_item("format", "WAV")?;
+                            sf.call_method("write", (&buffer, wav_numpy, 22050), Some(&sf_kwargs))?;
                             buffer.call_method0("getvalue")?.extract::<Vec<u8>>()
                         })()?;
 

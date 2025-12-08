@@ -65,6 +65,16 @@ impl TtsModel {
 
             let model = cls.call((), Some(&kwargs))?;
             println!("Model loaded successfully!");
+            
+            // Clear memory before returning to prepare for warmup
+            let torch = py.import("torch")?;
+            if torch.getattr("cuda")?.getattr("is_available")?.call0()?.extract::<bool>()? {
+                let gc = py.import("gc")?;
+                torch.getattr("cuda")?.call_method0("empty_cache")?;
+                gc.call_method0("collect")?;
+                println!("Cleared GPU cache after model loading");
+            }
+            
             Ok::<Py<PyAny>, PyErr>(model.into())
         })?;
 
