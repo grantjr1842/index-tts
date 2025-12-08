@@ -1,4 +1,5 @@
 import functools
+import os
 
 import torch
 import torch.nn as nn
@@ -490,6 +491,11 @@ class UnifiedVoice(nn.Module):
                         accel_gpt = accel_gpt.cuda()
                     accel_gpt.eval()
 
+                    # Get num_blocks from environment variable or use default
+                    # Reduced from 16 to 8 to save ~2GB VRAM (8*256 = 2048 tokens capacity)
+                    accel_num_blocks = int(os.environ.get('TARS_ACCEL_NUM_BLOCKS', '8'))
+                    print(f"Using {accel_num_blocks} blocks for accel engine")
+                    
                     lm_head_with_norm = nn.Sequential(self.final_norm, self.mel_head)
                     self.accel_engine = AccelInferenceEngine(
                         model=accel_gpt,
@@ -498,11 +504,13 @@ class UnifiedVoice(nn.Module):
                         num_heads=self.heads,
                         head_dim=self.model_dim // self.heads,
                         block_size=256,
-                        # Reduce to save memory (16*256 = 4096 tokens capacity)
-                        num_blocks=16,
+                        num_blocks=accel_num_blocks,
                         use_cuda_graph=True,
                     )
                     print("acceleration engine initialized")
+                    
+                    # Clear cache after accel initialization
+                    torch.cuda.empty_cache()
                 except ImportError:
                      print("flash_attn not found. Disabling acceleration.")
                      self.use_accel = False
@@ -528,9 +536,13 @@ class UnifiedVoice(nn.Module):
                                                           dtype=dtype)
                 self.inference_model = self.ds_engine.module.eval()
                 print(f"DeepSpeed inference initialized (dtype={dtype})")
+                
+                # Clear cache after DeepSpeed initialization
+                torch.cuda.empty_cache()
             except Exception as e:
                 print(f"DeepSpeed initialization failed: {e}. Falling back to standard model.")
                 self.inference_model = self.inference_model.eval()
+                torch.cuda.empty_cache()  # Clear cache even on failure
         else:
             self.inference_model = self.inference_model.eval()
 

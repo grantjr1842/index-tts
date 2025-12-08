@@ -3,6 +3,7 @@ from indextts.logging import get_logger
 from subprocess import CalledProcessError
 
 os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
+import gc
 import json
 import re
 import time
@@ -132,6 +133,11 @@ class IndexTTS2:
 
         self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16)
         logger.info("GPT config post-initialized")
+        
+        # Clear GPU cache after GPT initialization to free memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
 
         if self.use_cuda_kernel:
             # preload the CUDA kernel for BigVGAN
@@ -161,6 +167,11 @@ class IndexTTS2:
         self.semantic_codec = semantic_codec.to(self.device)
         self.semantic_codec.eval()
         logger.info('>> semantic_codec weights restored from: {}'.format(semantic_code_ckpt))
+        
+        # Clear GPU cache after semantic model loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
 
         s2mel_path = os.path.join(self.model_dir, self.cfg.s2mel_checkpoint)
         s2mel = MyModel(self.cfg.s2mel, use_gpt_latent=True)
@@ -200,6 +211,11 @@ class IndexTTS2:
         self.bigvgan.remove_weight_norm()
         self.bigvgan.eval()
         logger.info(f">> bigvgan weights restored from: {bigvgan_name}")
+        
+        # Clear GPU cache after vocoder loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
 
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
         self.normalizer = TextNormalizer()
@@ -468,7 +484,7 @@ class IndexTTS2:
                 self.cache_s2mel_style = None
                 self.cache_s2mel_prompt = None
                 self.cache_mel = None
-                # torch.cuda.empty_cache() # Removed for performance
+                torch.cuda.empty_cache()  # Re-enabled for memory management
             audio,sr = self._load_and_cut_audio(spk_audio_prompt,15,verbose)
             audio_22k = torchaudio.transforms.Resample(sr, 22050)(audio)
             audio_16k = torchaudio.transforms.Resample(sr, 16000)(audio)
@@ -522,7 +538,7 @@ class IndexTTS2:
         if self.cache_emo_cond is None or self.cache_emo_audio_prompt != emo_audio_prompt:
             if self.cache_emo_cond is not None:
                 self.cache_emo_cond = None
-                # torch.cuda.empty_cache() # Removed for performance
+                torch.cuda.empty_cache()  # Re-enabled for memory management
             emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt,15,verbose,sr=16000)
             emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
             emo_input_features = emo_inputs["input_features"]
