@@ -530,12 +530,24 @@ class UnifiedVoice(nn.Module):
             try:
                 import deepspeed
                 dtype = torch.float16 if half else torch.float32
-                self.ds_engine = deepspeed.init_inference(model=self.inference_model,
-                                                          mp_size=1,
-                                                          replace_with_kernel_inject=True,
-                                                          dtype=dtype)
+                
+                # Configure DeepSpeed with reduced max_out_tokens to save workspace memory
+                # Default 1024 requires ~100MB workspace; 512 requires ~50MB
+                max_out_tokens = int(os.environ.get('TARS_DS_MAX_TOKENS', '512'))
+                
+                ds_config = {
+                    "replace_with_kernel_inject": True,
+                    "dtype": dtype,
+                    "tensor_parallel": {"tp_size": 1},
+                    "max_out_tokens": max_out_tokens,
+                }
+                
+                self.ds_engine = deepspeed.init_inference(
+                    model=self.inference_model,
+                    config=ds_config
+                )
                 self.inference_model = self.ds_engine.module.eval()
-                print(f"DeepSpeed inference initialized (dtype={dtype})")
+                print(f"DeepSpeed inference initialized (dtype={dtype}, max_tokens={max_out_tokens})")
                 
                 # Clear cache after DeepSpeed initialization
                 torch.cuda.empty_cache()
