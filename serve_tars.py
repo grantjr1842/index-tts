@@ -1,8 +1,11 @@
 import io
 import json
+from operator import truediv
 import os
 import hashlib
 import asyncio
+import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Any, Dict, Tuple, Iterable
 
@@ -15,7 +18,11 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 # IndexTTS imports
-from indextts.logging import setup_logging, print_stage
+from indextts.logging import (
+    setup_logging, print_stage, print_section_header, print_section_footer,
+    print_section_item, print_config_section, print_request_start,
+    print_request_complete, GracefulShutdown, COLORS
+)
 print_stage("Setting up logging", "progress")
 setup_logging()
 print_stage("Importing IndexTTS2", "progress")
@@ -39,9 +46,9 @@ class Settings:
 
     max_concurrency: int = int(os.getenv("TARS_MAX_CONCURRENCY", "2"))
     device: Optional[str] = os.getenv("TARS_DEVICE")
-    use_fp16: Optional[bool] = None
-    use_torch_compile: bool = os.getenv("TARS_TORCH_COMPILE", "0") == "1"
-    use_cuda_kernel: Optional[bool] = None
+    use_fp16: Optional[bool] = True
+    use_torch_compile: bool = os.getenv("TARS_TORCH_COMPILE", "1") == "1"
+    use_cuda_kernel: Optional[bool] = True
     enable_streaming: bool = os.getenv("TARS_ENABLE_STREAMING", "1") == "1"
 
     def __init__(self) -> None:
@@ -70,14 +77,29 @@ concurrency_sem: asyncio.Semaphore | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global tts_model, executor, concurrency_sem
-    print_stage("Loading IndexTTS2 model", "progress")
+    
+    # Display configuration section
+    print()
+    print_config_section("TARS Server Configuration", {
+        "Device": settings.device,
+        "FP16": settings.use_fp16,
+        "Torch Compile": settings.use_torch_compile,
+        "CUDA Kernel": settings.use_cuda_kernel,
+        "Streaming": settings.enable_streaming,
+        "Max Concurrency": settings.max_concurrency,
+        "Reference Audio": os.path.basename(TARS_REFERENCE_AUDIO),
+        "Checkpoint Dir": CHECKPOINT_DIR,
+        "Cache Dir": CACHE_DIR,
+    })
+    print()
+    
     if not os.path.exists(TARS_REFERENCE_AUDIO):
         print_stage(f"Reference audio not found at {TARS_REFERENCE_AUDIO}", "failed")
 
     os.makedirs(CACHE_DIR, exist_ok=True)
 
-    print_stage(f"Using device: {settings.device}", "info")
-
+    # Model loading section
+    print_section_header("Model Loading")
     tts_model = IndexTTS2(
         cfg_path=CONFIG_PATH,
         model_dir=CHECKPOINT_DIR,
@@ -88,12 +110,21 @@ async def lifespan(app: FastAPI):
     )
     executor = ThreadPoolExecutor(max_workers=max(settings.max_concurrency, 1))
     concurrency_sem = asyncio.Semaphore(settings.max_concurrency)
+    print_section_footer()
+    
+    # Server ready section
+    print()
+    print_section_header("Server Ready", 40)
+    print_section_item("Port", "8009")
+    print_section_item("Endpoints", "/tts, /tts/stream, /healthz, /readyz")
     if torch.cuda.is_available():
-        print_stage("Model loaded successfully", "complete", message_extra=f"VRAM: {torch.cuda.memory_allocated()/1e9:.2f}GB")
-    else:
-        print_stage("Model loaded successfully", "complete")
+        print_section_item("VRAM", f"{torch.cuda.memory_allocated()/1e9:.2f}GB")
+    print_section_footer(40)
+    print()
+    
     yield
-    print_stage("Shutting down TARS server", "progress")
+    
+    # Shutdown handled by GracefulShutdown or here
     if executor:
         executor.shutdown(wait=True)
 
@@ -137,6 +168,11 @@ def _blocking_infer(request: TTSRequest) -> Tuple[bytes, int, Dict[str, Any]]:
     """
     if tts_model is None:
         raise RuntimeError("Model not loaded")
+    
+    request_id = str(uuid.uuid4())[:8]
+    print_request_start(request_id, request.text)
+    start_time = time.perf_counter()
+    
     cache_payload = {
         "text": request.text,
         "temperature": request.temperature,
@@ -149,7 +185,10 @@ def _blocking_infer(request: TTSRequest) -> Tuple[bytes, int, Dict[str, Any]]:
     cached = _maybe_cached(cache_payload)
     if cached:
         path, data = cached
-        print_stage(f"Cache hit: {path}", "info")
+        # Estimate audio length from file size (16-bit mono @ 22050Hz)
+        audio_length = len(data) / (22050 * 2)
+        duration = time.perf_counter() - start_time
+        print_request_complete(request_id, duration, audio_length, duration / audio_length if audio_length > 0 else 0, cached=True)
         return data, 0, cache_payload
 
     audio_result = tts_model.infer(
@@ -171,6 +210,12 @@ def _blocking_infer(request: TTSRequest) -> Tuple[bytes, int, Dict[str, Any]]:
     sf.write(buffer, audio_data, sample_rate, format="WAV")
     data = buffer.getvalue()
     _save_cache(cache_payload, data)
+    
+    duration = time.perf_counter() - start_time
+    audio_length = result.duration_sec if result.duration_sec else len(audio_data) / sample_rate
+    rtf = result.rtf if result.rtf else (duration / audio_length if audio_length > 0 else 0)
+    print_request_complete(request_id, duration, audio_length, rtf)
+    
     return data, sample_rate, cache_payload
 
 
@@ -262,6 +307,20 @@ async def readyz():
     ready = tts_model is not None and os.path.exists(TARS_REFERENCE_AUDIO)
     return {"ready": ready, "ref_audio": TARS_REFERENCE_AUDIO, "device": settings.device}
 
+def _cleanup():
+    """Cleanup function for graceful shutdown."""
+    global executor
+    if executor:
+        executor.shutdown(wait=False)
+
+
 if __name__ == "__main__":
-    print_stage("Starting Uvicorn server on port 8009", "progress")
-    uvicorn.run(app, host="0.0.0.0", port=8009)
+    print()
+    print_section_header("TARS Voice Server", 50)
+    print_section_item("Version", "2.0")
+    print_section_item("Port", "8009")
+    print_section_footer(50)
+    print()
+    
+    with GracefulShutdown(cleanup=_cleanup):
+        uvicorn.run(app, host="0.0.0.0", port=8009)
