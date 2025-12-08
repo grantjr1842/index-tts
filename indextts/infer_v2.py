@@ -1,5 +1,5 @@
 import os
-from indextts.logging import get_logger
+from indextts.logging import get_logger, print_stage
 from subprocess import CalledProcessError
 
 os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
@@ -118,35 +118,39 @@ class IndexTTS2:
         if self._use_int8:
             logger.info(">> INT8 quantization enabled for semantic model")
 
-        logger.info("Initializing UnifiedVoice...")
+        # Initialize VRAM tracker for monitoring memory usage during loading
+        from indextts.utils.vram_utils import VRAMTracker
+        self._vram_tracker = VRAMTracker(enabled=torch.cuda.is_available())
+
+        # ─── Load GPT Model ─────────────────────────────────────────────
+        t0 = time.perf_counter()
+        print_stage("Loading GPT model", "progress")
         self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
-        logger.info(f"Loading checkpoint from {self.gpt_path}...")
         load_checkpoint(self.gpt, self.gpt_path)
-        logger.info(f"Moving GPT to {self.device}...")
         self.gpt = self.gpt.to(self.device)
         if self.use_fp16:
-            logger.info("Converting GPT to fp16...")
             self.gpt.eval().half()
         else:
             self.gpt.eval()
-        logger.info(f">> GPT weights restored from: {self.gpt_path}")
 
         if use_deepspeed:
             try:
                 import deepspeed
             except (ImportError, OSError, CalledProcessError) as e:
                 use_deepspeed = False
-                logger.warning(f">> Failed to load DeepSpeed. Falling back to normal inference. Error: {e}")
+                self._use_deepspeed = False
 
         self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16)
-        logger.info("GPT config post-initialized")
-        
-        # Clear GPU cache after GPT initialization to free memory
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
+        print_stage("GPT model loaded", "complete", time.perf_counter() - t0)
+        if self._vram_tracker:
+            self._vram_tracker.snapshot("gpt_loaded", model_name="GPT")
+            self._vram_tracker.get_model_vram(self.gpt, "GPT")
 
+        # ─── Load CUDA Kernel (if enabled) ──────────────────────────────
         if self.use_cuda_kernel:
             # preload the CUDA kernel for BigVGAN
             try:
@@ -154,47 +158,54 @@ class IndexTTS2:
 
                 logger.info(f">> Preload custom CUDA kernel for BigVGAN {activation1d.anti_alias_activation_cuda}")
             except Exception as e:
-                logger.warning(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
-                logger.warning(f"{e!r}")
                 self.use_cuda_kernel = False
-        
-        logger.info("Loading Feature Extractor...")
+                print_stage("CUDA kernel", "failed", message_extra="falling back to torch")
+
+        # ─── Load Semantic Model ────────────────────────────────────────
+        t0 = time.perf_counter()
+        print_stage("Loading semantic model", "progress")
         self.extract_features = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
-        logger.info(">> Loaded Feature Extractor")
         self.semantic_model, self.semantic_mean, self.semantic_std = build_semantic_model(
             os.path.join(self.model_dir, self.cfg.w2v_stat))
         self.semantic_model = self.semantic_model.to(self.device)
         self.semantic_model.eval()
         self.semantic_mean = self.semantic_mean.to(self.device)
         self.semantic_std = self.semantic_std.to(self.device)
-        logger.info(">> Loaded Semantic Model")
         
         # Apply INT8 quantization to semantic model if enabled
         if self._use_int8:
-            logger.info(">> Applying INT8 quantization to semantic_model...")
             from indextts.utils.vram_utils import quantize_model_int8
             self.semantic_model = quantize_model_int8(self.semantic_model)
             # Also move mean/std to CPU so all semantic operations are on CPU
             self.semantic_mean = self.semantic_mean.cpu()
             self.semantic_std = self.semantic_std.cpu()
-            logger.info(f">> semantic_model quantized to INT8 (now on CPU)")
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 gc.collect()
+        print_stage("Semantic model loaded" + (" (INT8)" if self._use_int8 else ""), "complete", time.perf_counter() - t0)
+        if self._vram_tracker and not self._use_int8:
+            self._vram_tracker.snapshot("semantic_loaded", model_name="Semantic")
+            self._vram_tracker.get_model_vram(self.semantic_model, "Semantic")
 
+        # ─── Load Semantic Codec ────────────────────────────────────────
+        t0 = time.perf_counter()
+        print_stage("Loading semantic codec", "progress")
         semantic_codec = build_semantic_codec(self.cfg.semantic_codec)
         semantic_code_ckpt = hf_hub_download("amphion/MaskGCT", filename="semantic_codec/model.safetensors")
         safetensors.torch.load_model(semantic_codec, semantic_code_ckpt)
         self.semantic_codec = semantic_codec.to(self.device)
         self.semantic_codec.eval()
-        logger.info('>> semantic_codec weights restored from: {}'.format(semantic_code_ckpt))
-        
-        # Clear GPU cache after semantic model loading
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
+        print_stage("Semantic codec loaded", "complete", time.perf_counter() - t0)
+        if self._vram_tracker:
+            self._vram_tracker.snapshot("codec_loaded", model_name="SemanticCodec")
+            self._vram_tracker.get_model_vram(self.semantic_codec, "SemanticCodec")
 
-
+        # ─── Load S2Mel Model ───────────────────────────────────────────
+        t0 = time.perf_counter()
+        print_stage("Loading S2Mel model", "progress")
         s2mel_path = os.path.join(self.model_dir, self.cfg.s2mel_checkpoint)
         s2mel = MyModel(self.cfg.s2mel, use_gpt_latent=True)
         s2mel, _, _, _ = load_checkpoint2(
@@ -208,16 +219,15 @@ class IndexTTS2:
         self.s2mel = s2mel.to(self.device)
         self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
         
-        # Enable torch.compile optimization if requested
         if self.use_torch_compile:
-            logger.info(">> Enabling torch.compile optimization")
             self.s2mel.enable_torch_compile()
-            logger.info(">> torch.compile optimization enabled successfully")
         
         self.s2mel.eval()
-        logger.info(f">> s2mel weights restored from: {s2mel_path}")
+        print_stage("S2Mel model loaded", "complete", time.perf_counter() - t0)
+        if self._vram_tracker:
+            self._vram_tracker.snapshot("s2mel_loaded", model_name="S2Mel")
 
-        # load campplus_model
+        # ─── Load Speaker Encoder ───────────────────────────────────────
         campplus_ckpt_path = hf_hub_download(
             "funasr/campplus", filename="campplus_cn_common.bin"
         )
@@ -225,16 +235,14 @@ class IndexTTS2:
         campplus_model.load_state_dict(torch.load(campplus_ckpt_path, map_location="cpu"))
         self.campplus_model = campplus_model.to(self.device)
         self.campplus_model.eval()
-        logger.info(f">> campplus_model weights restored from: {campplus_ckpt_path}")
 
+        # ─── Load Vocoder ───────────────────────────────────────────────
         bigvgan_name = self.cfg.vocoder.name
         self.bigvgan = bigvgan.BigVGAN.from_pretrained(bigvgan_name, use_cuda_kernel=self.use_cuda_kernel)
         self.bigvgan = self.bigvgan.to(self.device)
         self.bigvgan.remove_weight_norm()
         self.bigvgan.eval()
-        logger.info(f">> bigvgan weights restored from: {bigvgan_name}")
         
-        # Clear GPU cache after vocoder loading
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
@@ -242,9 +250,7 @@ class IndexTTS2:
         self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset["bpe_model"])
         self.normalizer = TextNormalizer()
         self.normalizer.load()
-        logger.info(">> TextNormalizer loaded")
         self.tokenizer = TextTokenizer(self.bpe_path, self.normalizer)
-        logger.info(f">> bpe model loaded from: {self.bpe_path}")
 
         emo_matrix = torch.load(os.path.join(self.model_dir, self.cfg.emo_matrix))
         self.emo_matrix = emo_matrix.to(self.device)

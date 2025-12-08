@@ -124,3 +124,54 @@ class VRAMProfiler:
                   f"allocated {delta_alloc:+.3f}GB, "
                   f"reserved {delta_res:+.3f}GB, "
                   f"total {end_allocated/1e9:.2f}GB")
+
+
+class VRAMTracker:
+    """Track VRAM usage across model loading stages.
+    
+    Usage:
+        tracker = VRAMTracker()
+        # ... load model ...
+        tracker.snapshot("after_gpt")
+        # ... load more ...
+        tracker.snapshot("after_semantic")
+        tracker.print_summary()
+    """
+    
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled and torch.cuda.is_available()
+        self.snapshots: list[tuple[str, float, float]] = []
+        if self.enabled:
+            self.snapshots.append(("init", torch.cuda.memory_allocated() / 1e9, 0.0))
+    
+    def snapshot(self, name: str, model_name: Optional[str] = None) -> None:
+        """Take a VRAM snapshot with optional model size tracking."""
+        if not self.enabled:
+            return
+        torch.cuda.synchronize()
+        allocated = torch.cuda.memory_allocated() / 1e9
+        delta = allocated - (self.snapshots[-1][1] if self.snapshots else 0)
+        self.snapshots.append((name, allocated, delta))
+        
+        if model_name:
+            print(f"[VRAM] {name}: {allocated:.2f}GB total (+{delta:.2f}GB for {model_name})")
+        else:
+            print(f"[VRAM] {name}: {allocated:.2f}GB total (+{delta:.2f}GB)")
+    
+    def get_model_vram(self, model: torch.nn.Module, name: str) -> float:
+        """Estimate VRAM used by a model's parameters."""
+        if not self.enabled:
+            return 0.0
+        total_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+        total_gb = total_bytes / 1e9
+        print(f"[VRAM] {name} params: {total_gb:.2f}GB")
+        return total_gb
+    
+    def print_summary(self) -> None:
+        """Print summary of all snapshots."""
+        if not self.enabled or not self.snapshots:
+            return
+        print("\n[VRAM Summary]")
+        for name, allocated, delta in self.snapshots:
+            print(f"  {name}: {allocated:.2f}GB (+{delta:.2f}GB)")
+        print(f"  Final: {self.snapshots[-1][1]:.2f}GB")

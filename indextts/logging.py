@@ -1,12 +1,61 @@
 import logging
 import os
 import sys
+import time
 from logging.handlers import RotatingFileHandler
+from typing import Optional
 
 # Default log level
 DEFAULT_LOG_LEVEL = logging.INFO
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# ANSI color codes for terminal output
+COLORS = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "cyan": "\033[36m",
+    "red": "\033[31m",
+}
+
+# Status symbols
+STATUS_SYMBOLS = {
+    "progress": f"{COLORS['yellow']}[...]{COLORS['reset']}",
+    "complete": f"{COLORS['green']}[OK]{COLORS['reset']}",
+    "failed": f"{COLORS['red']}[FAIL]{COLORS['reset']}",
+    "info": f"{COLORS['blue']}[i]{COLORS['reset']}",
+}
+
+
+def print_stage(
+    message: str,
+    status: str = "progress",
+    elapsed: Optional[float] = None,
+    message_extra: Optional[str] = None,
+) -> None:
+    """Print a formatted stage message with status indicator.
+    
+    Args:
+        message: The main message to display
+        status: One of 'progress', 'complete', 'failed', 'info'
+        elapsed: Optional elapsed time in seconds to display
+        message_extra: Optional extra message to append
+    """
+    symbol = STATUS_SYMBOLS.get(status, STATUS_SYMBOLS["info"])
+    
+    parts = [symbol, message]
+    
+    if elapsed is not None:
+        parts.append(f"{COLORS['dim']}({elapsed:.2f}s){COLORS['reset']}")
+    
+    if message_extra:
+        parts.append(f"{COLORS['dim']}{message_extra}{COLORS['reset']}")
+    
+    print(" ".join(parts))
 
 def setup_logging(name: str = "indextts", log_level: int | str = DEFAULT_LOG_LEVEL, log_dir: str = "logs"):
     """

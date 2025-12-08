@@ -1,9 +1,0 @@
-Benchmarking http://localhost:8009 with concurrency=1, total_requests=3, stream=False
-Warming up...
-Error: 500
-Body: Error: TypeError: No format specified and unable to get format from file extension: <_io.BytesIO object at 0x7c6c25e0c9a0>
-Starting benchmark...
-Exception: Server disconnected
-Exception: Cannot connect to host localhost:8009 ssl:default [Connect call failed ('127.0.0.1', 8009)]
-Exception: Cannot connect to host localhost:8009 ssl:default [Connect call failed ('127.0.0.1', 8009)]
-All requests failed.
