@@ -50,7 +50,7 @@ pnpm-debug.log*
 # Project Specific
 /data/
 /outputs/
-/logs/
+logs/
 /cache/
 /checkpoints/*
 !/checkpoints/*.yaml
